@@ -248,31 +248,45 @@ async function migrateLegacyCache(globalStoragePath: string, globalState: vscode
     }
 
     const destBase = path.join(globalStoragePath, 'cache');
+    let migratedCount = 0;
+    let failedCount = 0;
 
     for (const { cachePath } of legacyDirs) {
         try {
             // Safety: skip if .soql-cache is a symlink
             if (fs.lstatSync(cachePath).isSymbolicLink()) {
                 outputChannel.appendLine(`Skipping symlinked cache: ${cachePath}`);
+                failedCount++;
                 continue;
             }
 
             // Recursively copy all files preserving directory structure
             copyDirRecursive(cachePath, destBase);
             outputChannel.appendLine(`Migrated cache from ${cachePath} to ${destBase}`);
+            migratedCount++;
 
             if (choice === 'Migrate & Delete Old') {
                 fs.rmSync(cachePath, { recursive: true, force: true });
                 outputChannel.appendLine(`Deleted legacy cache: ${cachePath}`);
             }
         } catch (err: any) {
+            failedCount++;
             outputChannel.appendLine(`Cache migration error: ${err.message}`);
             vscode.window.showErrorMessage(`Failed to migrate cache: ${err.message}`);
         }
     }
 
-    vscode.window.showInformationMessage('SOQL Editor: Cache migrated successfully');
-    await globalState.update('cacheMigrationDone', true);
+    if (failedCount === 0) {
+        vscode.window.showInformationMessage(
+            `SOQL Editor: Cache migration completed (${migratedCount}/${legacyDirs.length} folders)`
+        );
+        await globalState.update('cacheMigrationDone', true);
+    } else {
+        vscode.window.showWarningMessage(
+            `SOQL Editor: Cache migration partially completed (${migratedCount} succeeded, ${failedCount} failed). You can retry on next startup.`
+        );
+        await globalState.update('cacheMigrationDone', false);
+    }
 }
 
 function copyDirRecursive(src: string, dest: string) {

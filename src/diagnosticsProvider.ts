@@ -12,7 +12,8 @@ export class SoqlDiagnosticsProvider {
     private diagnosticCollection: vscode.DiagnosticCollection;
     private sfCli: SfCliService;
     private metadata: MetadataProvider;
-    private debounceTimer: NodeJS.Timeout | undefined;
+    private debounceTimers = new Map<string, NodeJS.Timeout>();
+    private validationGeneration = new Map<string, number>();
 
     constructor(sfCli: SfCliService, metadata: MetadataProvider) {
         this.sfCli = sfCli;
@@ -25,20 +26,31 @@ export class SoqlDiagnosticsProvider {
      */
     scheduleValidation(document: vscode.TextDocument) {
         if (document.languageId !== 'soql') { return; }
+        const key = document.uri.toString();
+        const nextGeneration = (this.validationGeneration.get(key) || 0) + 1;
+        this.validationGeneration.set(key, nextGeneration);
 
-        if (this.debounceTimer) {
-            clearTimeout(this.debounceTimer);
+        const existing = this.debounceTimers.get(key);
+        if (existing) {
+            clearTimeout(existing);
         }
 
-        this.debounceTimer = setTimeout(() => {
-            this.validate(document);
+        const timer = setTimeout(() => {
+            this.validate(document, nextGeneration);
         }, 500);
+        this.debounceTimers.set(key, timer);
     }
 
-    async validate(document: vscode.TextDocument) {
+    async validate(document: vscode.TextDocument, generation: number) {
+        const key = document.uri.toString();
+        const latestGeneration = this.validationGeneration.get(key) || 0;
+        if (generation !== latestGeneration) { return; }
+
         const text = document.getText();
         if (text.trim().length === 0) {
-            this.diagnosticCollection.set(document.uri, []);
+            if ((this.validationGeneration.get(key) || 0) === generation) {
+                this.diagnosticCollection.set(document.uri, []);
+            }
             return;
         }
 
@@ -63,7 +75,10 @@ export class SoqlDiagnosticsProvider {
             diagnostics.push(...fieldDiags);
         }
 
-        this.diagnosticCollection.set(document.uri, diagnostics);
+        const currentGeneration = this.validationGeneration.get(key) || 0;
+        if (generation === currentGeneration) {
+            this.diagnosticCollection.set(document.uri, diagnostics);
+        }
     }
 
     private async validateFields(document: vscode.TextDocument): Promise<vscode.Diagnostic[]> {
@@ -95,9 +110,6 @@ export class SoqlDiagnosticsProvider {
             describe.fields
                 .filter(f => f.relationshipName)
                 .map(f => f.relationshipName!.toLowerCase())
-        );
-        const childRelationships = new Set(
-            describe.childRelationships.map(c => c.relationshipName.toLowerCase())
         );
 
         const selectFields = extractSelectFields(text);
@@ -171,8 +183,10 @@ export class SoqlDiagnosticsProvider {
 
     dispose() {
         this.diagnosticCollection.dispose();
-        if (this.debounceTimer) {
-            clearTimeout(this.debounceTimer);
+        for (const timer of this.debounceTimers.values()) {
+            clearTimeout(timer);
         }
+        this.debounceTimers.clear();
+        this.validationGeneration.clear();
     }
 }

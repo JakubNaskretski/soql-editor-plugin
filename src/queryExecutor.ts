@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
 import { SfCliService } from './sfCliService';
+import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
 
 /**
  * Executes SOQL queries and displays results in a webview panel.
  */
 export class QueryExecutor {
+    private static readonly MAX_RENDER_ROWS = 2000;
     private sfCli: SfCliService;
     private outputChannel: vscode.OutputChannel;
     private panel: vscode.WebviewPanel | undefined;
@@ -38,26 +40,26 @@ export class QueryExecutor {
         if (!query) { return; }
 
         // Safety: if no LIMIT, run a COUNT() first
-        const hasLimit = /\bLIMIT\s+\d+/i.test(query);
-        if (!hasLimit) {
-            const countQuery = this.buildCountQuery(query);
+        if (!hasLimitClause(query)) {
+            const countQuery = buildCountQuery(query);
             if (countQuery) {
                 try {
                     const countResult = await this.sfCli.executeQuery(countQuery);
                     const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
-
-                    const choice = await vscode.window.showWarningMessage(
-                        `Query matches ${totalRows} records. Run it?`,
-                        { modal: false },
-                        'Add LIMIT 200',
-                        'Add LIMIT 2000',
-                        `Fetch all ${totalRows}`
-                    );
-                    if (!choice) { return; }
-                    if (choice === 'Add LIMIT 200') {
-                        query = query.replace(/\s*;?\s*$/, '') + ' LIMIT 200';
-                    } else if (choice === 'Add LIMIT 2000') {
-                        query = query.replace(/\s*;?\s*$/, '') + ' LIMIT 2000';
+                    if (shouldPromptForCount(totalRows)) {
+                        const choice = await vscode.window.showWarningMessage(
+                            `Query matches ${totalRows} records. Run it?`,
+                            { modal: false },
+                            'Add LIMIT 200',
+                            'Add LIMIT 2000',
+                            `Fetch all ${totalRows}`
+                        );
+                        if (!choice) { return; }
+                        if (choice === 'Add LIMIT 200') {
+                            query = applyLimit(query, 200);
+                        } else if (choice === 'Add LIMIT 2000') {
+                            query = applyLimit(query, 2000);
+                        }
                     }
                 } catch {
                     // COUNT failed — run anyway
@@ -83,30 +85,20 @@ export class QueryExecutor {
         );
     }
 
-    private buildCountQuery(query: string): string | null {
-        const match = query.match(/\bFROM\b\s+([\s\S]*)/i);
-        if (!match) { return null; }
-        const afterFrom = match[1]
-            .replace(/\bORDER\s+BY\b[\s\S]*/i, '')
-            .replace(/\bGROUP\s+BY\b[\s\S]*/i, '')
-            .replace(/\bOFFSET\s+\d+/i, '')
-            .trim()
-            .replace(/\s*;?\s*$/, '');
-        return `SELECT COUNT() FROM ${afterFrom}`;
-    }
-
     private showResults(query: string, result: any) {
         const records: any[] = result.records || [];
         const totalSize: number = result.totalSize || records.length;
+        const truncated = records.length > QueryExecutor.MAX_RENDER_ROWS;
+        const displayedRecords = truncated ? records.slice(0, QueryExecutor.MAX_RENDER_ROWS) : records;
 
-        if (records.length === 0) {
+        if (displayedRecords.length === 0) {
             vscode.window.showInformationMessage(`Query returned 0 records`);
             return;
         }
 
         // Collect all column names from records
         const columns = new Set<string>();
-        for (const rec of records) {
+        for (const rec of displayedRecords) {
             for (const key of Object.keys(rec)) {
                 if (key !== 'attributes') {
                     columns.add(key);
@@ -129,14 +121,15 @@ export class QueryExecutor {
         }
 
         this.panel.title = `SOQL Results (${totalSize} records)`;
-        this.panel.webview.html = this.buildResultsHtml(query, columnList, records, totalSize);
+        this.panel.webview.html = this.buildResultsHtml(query, columnList, displayedRecords, totalSize, truncated);
     }
 
     private buildResultsHtml(
         query: string,
         columns: string[],
         records: any[],
-        totalSize: number
+        totalSize: number,
+        truncated: boolean
     ): string {
         const escapeHtml = (str: string) =>
             String(str)
@@ -222,7 +215,7 @@ export class QueryExecutor {
 </head>
 <body>
     <div class="query">${escapeHtml(query)}</div>
-    <div class="summary">${totalSize} record${totalSize !== 1 ? 's' : ''} returned</div>
+    <div class="summary">${totalSize} record${totalSize !== 1 ? 's' : ''} returned${truncated ? ` (showing first ${QueryExecutor.MAX_RENDER_ROWS})` : ''}</div>
     <div class="table-wrapper">
         <table>
             <thead><tr>${headerCells}</tr></thead>

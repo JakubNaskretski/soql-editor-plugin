@@ -1,6 +1,10 @@
 import * as vscode from 'vscode';
 import { SfCliService, OrgInfo } from './sfCliService';
 
+interface OrgQuickPickItem extends vscode.QuickPickItem {
+    org: OrgInfo;
+}
+
 /**
  * Manages org selection via a status bar item and quick pick.
  */
@@ -40,11 +44,12 @@ export class OrgPicker {
             return;
         }
 
-        const items: vscode.QuickPickItem[] = orgs.map(o => ({
+        const items: OrgQuickPickItem[] = orgs.map(o => ({
             label: o.alias,
             description: o.username,
             detail: o.instanceUrl,
             picked: o.isDefault,
+            org: o,
         }));
 
         const picked = await vscode.window.showQuickPick(items, {
@@ -54,12 +59,12 @@ export class OrgPicker {
         });
 
         if (picked) {
-            const org = orgs.find(o => o.username === picked.description);
-            if (org) {
-                this.sfCli.setCurrentOrg(org);
+            const selectedOrg = picked.org;
+            if (selectedOrg) {
+                this.sfCli.setCurrentOrg(selectedOrg);
                 this.updateLabel();
-                this.onOrgChangedEmitter.fire(org);
-                vscode.window.showInformationMessage(`SOQL Editor: Now targeting ${org.alias}`);
+                this.onOrgChangedEmitter.fire(selectedOrg);
+                vscode.window.showInformationMessage(`SOQL Editor: Now targeting ${selectedOrg.alias}`);
             }
         }
     }
