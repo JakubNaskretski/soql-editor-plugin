@@ -2,7 +2,7 @@
   "name": "soql-editor",
   "displayName": "SOQL Editor",
   "description": "SOQL editor with autocomplete, validation, and multi-org query execution",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "keywords": [

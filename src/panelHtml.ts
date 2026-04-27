@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 export function getPanelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(extensionUri, 'src', 'panel.js')
+        vscode.Uri.joinPath(extensionUri, 'out', 'panel.js')
     );
     return /*html*/ `<!DOCTYPE html>
 <html lang="en">

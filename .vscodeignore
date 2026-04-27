@@ -10,6 +10,8 @@ releases/**
 
 # Tests and tooling config not required at runtime
 **/*.test.ts
+**/*.test.js
+**/*.test.js.map
 vitest.config.ts
 
 # Build/config scripts not needed in shipped VSIX
@@ -17,4 +19,8 @@ install.sh
 tsconfig.json
 package-lock.json
 TODO.md
+RELEASE_CHECKLIST.md
+AUDIT_REPORT.md
+.gitignore
 .DS_Store
+out/**/*.js.map

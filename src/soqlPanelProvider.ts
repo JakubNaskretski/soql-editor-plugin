@@ -34,7 +34,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         this.view = webviewView;
         webviewView.webview.options = {
             enableScripts: true,
-            localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'src')]
+            localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'out')]
         };
         this.outputChannel.appendLine('resolveWebviewView called, setting HTML');
         webviewView.webview.html = getPanelHtml(webviewView.webview, this.extensionUri);
