@@ -1,0 +1,9 @@
+-- Example SOQL file
+-- Open the command palette and run "SOQL: Select Org" first
+-- Then press Cmd+Enter (Mac) or Ctrl+Enter (Win/Linux) to execute
+
+SELECT Id, Name, Email, Phone
+FROM Contact
+WHERE Email != null
+ORDER BY Name ASC
+LIMIT 10

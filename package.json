@@ -1,0 +1,108 @@
+{
+  "name": "soql-editor",
+  "displayName": "SOQL Editor",
+  "description": "SOQL editor with autocomplete, validation, and multi-org query execution",
+  "version": "0.6.0",
+  "publisher": "vcs",
+  "engines": {
+    "vscode": "^1.115.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:soql",
+    "onView:soqlEditor.panel"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "soql-editor",
+          "title": "SOQL Editor",
+          "icon": "$(database)"
+        }
+      ]
+    },
+    "views": {
+      "soql-editor": [
+        {
+          "type": "webview",
+          "id": "soqlEditor.panel",
+          "name": "SOQL Query"
+        }
+      ]
+    },
+    "languages": [
+      {
+        "id": "soql",
+        "aliases": [
+          "SOQL",
+          "soql"
+        ],
+        "extensions": [
+          ".soql"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "soql",
+        "scopeName": "source.soql",
+        "path": "./syntaxes/soql.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "soqlEditor.executeQuery",
+        "title": "SOQL: Execute Query",
+        "icon": "$(play)"
+      },
+      {
+        "command": "soqlEditor.selectOrg",
+        "title": "SOQL: Select Org"
+      },
+      {
+        "command": "soqlEditor.refreshMetadata",
+        "title": "SOQL: Refresh Object Metadata"
+      },
+      {
+        "command": "soqlEditor.syncMetadata",
+        "title": "SOQL: Sync All Metadata from Org"
+      },
+      {
+        "command": "soqlEditor.syncCommonMetadata",
+        "title": "SOQL: Sync Common + Custom Objects (fast)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "soqlEditor.executeQuery",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorLangId == soql"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "soqlEditor.executeQuery",
+          "when": "editorLangId == soql",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/vscode": "^1.115.0",
+    "typescript": "^6.0.3"
+  }
+}
