@@ -23,6 +23,7 @@
     const btnAddTab = document.getElementById('btnAddTab');
 
     const MAX_TABS = 3;
+    const MAX_RENDER_ROWS = 2000;
 
     let suggestions = [];
     let selectedIdx = -1;
@@ -489,9 +490,11 @@
             resultsArea.innerHTML = '<div class="info-msg">Query returned 0 records</div>';
             return;
         }
+        const truncated = rows.length > MAX_RENDER_ROWS;
+        const displayedRows = truncated ? rows.slice(0, MAX_RENDER_ROWS) : rows;
         const headerCells = columns.map(c => '<th>' + esc(c) + '</th>').join('');
         const sfIdRegex = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
-        const bodyRows = rows.map(row => {
+        const bodyRows = displayedRows.map(row => {
             const cells = columns.map(c => {
                 const val = row[c];
                 if (val === 'null') return '<td class="null-val">null</td>';
@@ -504,7 +507,10 @@
         }).join('');
 
         resultsArea.innerHTML =
-            '<div class="results-summary">' + totalSize + ' record' + (totalSize !== 1 ? 's' : '') + '</div>' +
+            '<div class="results-summary">' +
+            totalSize + ' record' + (totalSize !== 1 ? 's' : '') +
+            (truncated ? ' (showing first ' + MAX_RENDER_ROWS + ')' : '') +
+            '</div>' +
             '<table class="results-table"><thead><tr>' + headerCells + '</tr></thead>' +
             '<tbody>' + bodyRows + '</tbody></table>';
 
@@ -723,7 +729,13 @@
         requestValidation();
     }
     } catch(initErr) {
-        document.body.insertAdjacentHTML('afterbegin',
-            '<div style="padding:8px;color:red;font-size:12px;border-bottom:2px solid red;">JS Init Error: ' + initErr.message + '</div>');
+        const banner = document.createElement('div');
+        banner.style.padding = '8px';
+        banner.style.color = 'red';
+        banner.style.fontSize = '12px';
+        banner.style.borderBottom = '2px solid red';
+        const message = initErr && initErr.message ? initErr.message : String(initErr);
+        banner.textContent = 'JS Init Error: ' + message;
+        document.body.insertBefore(banner, document.body.firstChild);
     }
 })();

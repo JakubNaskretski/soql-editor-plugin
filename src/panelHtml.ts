@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 
 export function getPanelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+    const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(
         vscode.Uri.joinPath(extensionUri, 'src', 'panel.js')
     );
@@ -9,6 +10,7 @@ export function getPanelHtml(webview: vscode.Webview, extensionUri: vscode.Uri):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -385,7 +387,16 @@ body {
     <div class="console-body" id="consoleBody"></div>
 </div>
 
-<script src="${scriptUri}"><\/script>
+<script nonce="${nonce}" src="${scriptUri}"><\/script>
 </body>
 </html>`;
+}
+
+function getNonce(): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let out = '';
+    for (let i = 0; i < 32; i++) {
+        out += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return out;
 }

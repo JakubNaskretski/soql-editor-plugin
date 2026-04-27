@@ -4,6 +4,7 @@ import { MetadataProvider } from './metadataProvider';
 import { getPanelHtml } from './panelHtml';
 import { getSuggestions } from './panelSuggestions';
 import { validateSoqlStructure } from './soqlParser';
+import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
 
 /**
  * Sidebar webview: SOQL textarea with inline suggestions + run button + results table.
@@ -15,6 +16,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
     private metadata: MetadataProvider;
     private outputChannel: vscode.OutputChannel;
     private extensionUri: vscode.Uri;
+    private logSubscription?: vscode.Disposable;
 
     constructor(sfCli: SfCliService, metadata: MetadataProvider, outputChannel: vscode.OutputChannel, extensionUri: vscode.Uri) {
         this.sfCli = sfCli;
@@ -36,6 +38,9 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         this.outputChannel.appendLine('resolveWebviewView called, setting HTML');
         webviewView.webview.html = getPanelHtml(webviewView.webview, this.extensionUri);
 
+        this.logSubscription?.dispose();
+        this.logSubscription = undefined;
+
         // If an org is already selected, update the label immediately
         const currentOrg = this.sfCli.getCurrentOrg();
         if (currentOrg) {
@@ -43,11 +48,18 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         }
 
         // Pipe CLI log events to the webview console
-        this.sfCli.onLog(({ level, message }) => {
+        this.logSubscription = this.sfCli.onLog(({ level, message }: { level: string; message: string }) => {
             this.postMessage({ type: 'log', level, message });
         });
+        webviewView.onDidDispose(() => {
+            this.logSubscription?.dispose();
+            this.logSubscription = undefined;
+            if (this.view === webviewView) {
+                this.view = undefined;
+            }
+        });
 
-        webviewView.webview.onDidReceiveMessage(async (msg) => {
+        webviewView.webview.onDidReceiveMessage(async (msg: any) => {
             try {
                 switch (msg.type) {
                     case 'executeQuery':
@@ -181,20 +193,14 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         }
 
         // Safety: if no LIMIT, run a COUNT() first to warn the user
-        const hasLimit = /\bLIMIT\s+\d+/i.test(query);
-        if (!hasLimit) {
-            const countQuery = this.buildCountQuery(query);
+        if (!hasLimitClause(query)) {
+            const countQuery = buildCountQuery(query);
             if (countQuery) {
-                this.postMessage({ type: 'log', level: 'cmd', message: countQuery });
+                this.postMessage({ type: 'log', level: 'cmd', message: 'Preparing COUNT() preflight query' });
                 try {
                     const countResult = await this.sfCli.executeQuery(countQuery);
                     const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
-                    const rowCount = typeof totalRows === 'number' ? totalRows : parseInt(String(totalRows), 10);
-
-                    // Only warn if over 5000 records
-                    if (!isNaN(rowCount) && rowCount <= 5000) {
-                        // Small result set — run without prompting
-                    } else {
+                    if (shouldPromptForCount(totalRows)) {
                         const choice = await vscode.window.showWarningMessage(
                             `Query matches ${totalRows} records. Run it?`,
                             { modal: false },
@@ -204,9 +210,9 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                         );
                         if (!choice) { return; }
                         if (choice === 'Add LIMIT 200') {
-                            query = query.replace(/\s*;?\s*$/, '') + ' LIMIT 200';
+                            query = applyLimit(query, 200);
                         } else if (choice === 'Add LIMIT 2000') {
-                            query = query.replace(/\s*;?\s*$/, '') + ' LIMIT 2000';
+                            query = applyLimit(query, 2000);
                         }
                     }
                 } catch {
@@ -256,20 +262,4 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    /**
-     * Build a COUNT() query from the original query, preserving FROM and WHERE.
-     * e.g. "SELECT Name, Email FROM Contact WHERE Email != null"
-     *   -> "SELECT COUNT() FROM Contact WHERE Email != null"
-     */
-    private buildCountQuery(query: string): string | null {
-        const match = query.match(/\bFROM\b\s+([\s\S]*)/i);
-        if (!match) { return null; }
-        const afterFrom = match[1]
-            .replace(/\bORDER\s+BY\b[\s\S]*/i, '')
-            .replace(/\bGROUP\s+BY\b[\s\S]*/i, '')
-            .replace(/\bOFFSET\s+\d+/i, '')
-            .trim()
-            .replace(/\s*;?\s*$/, '');
-        return `SELECT COUNT() FROM ${afterFrom}`;
-    }
 }
