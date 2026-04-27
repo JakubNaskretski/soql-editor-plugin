@@ -23,7 +23,7 @@
     const btnAddTab = document.getElementById('btnAddTab');
 
     const MAX_TABS = 3;
-    const MAX_RENDER_ROWS = 2000;
+    const MAX_RENDER_ROWS = 10000;
 
     let suggestions = [];
     let selectedIdx = -1;
@@ -36,16 +36,17 @@
     let consoleOpen = false;
     let lastColumns = [];
     let lastRows = [];
+    let lastRawRows = [];
     let currentOrgLabel = 'No Org';
 
     // ── multi-tab state ──
     let activeTab = 0;
     let tabs = [
-        { query: '', columns: [], rows: [], totalSize: 0, errors: [], hasResults: false }
+        { query: '', columns: [], rows: [], rawRows: [], totalSize: 0, errors: [], hasResults: false }
     ];
 
     function createTabState() {
-        return { query: '', columns: [], rows: [], totalSize: 0, errors: [], hasResults: false };
+        return { query: '', columns: [], rows: [], rawRows: [], totalSize: 0, errors: [], hasResults: false };
     }
 
     // ── tab bar rendering ──
@@ -80,6 +81,7 @@
         tab.errors = currentErrors;
         tab.columns = lastColumns;
         tab.rows = lastRows;
+        tab.rawRows = lastRawRows;
         tab.hasResults = resultActions.classList.contains('visible');
     }
 
@@ -89,6 +91,7 @@
         currentErrors = tab.errors || [];
         lastColumns = tab.columns || [];
         lastRows = tab.rows || [];
+        lastRawRows = tab.rawRows || [];
         if (tab.hasResults && lastColumns.length > 0) {
             resultActions.classList.add('visible');
             renderResults(lastColumns, lastRows, tab.totalSize || lastRows.length);
@@ -217,8 +220,8 @@
         vscode.postMessage({ type: 'openCSV', text: header + '\n' + body });
     });
     btnExportJSON.addEventListener('click', () => {
-        if (!lastRows.length) return;
-        const json = JSON.stringify(lastRows, null, 2);
+        if (!lastRawRows.length) return;
+        const json = JSON.stringify(lastRawRows, null, 2);
         vscode.postMessage({ type: 'openJSON', text: json });
     });
 
@@ -441,10 +444,12 @@
             case 'queryResults':
                 lastColumns = msg.columns;
                 lastRows = msg.rows;
+                lastRawRows = msg.rawRows || msg.rows || [];
                 resultActions.classList.add('visible');
                 renderResults(msg.columns, msg.rows, msg.totalSize);
                 tabs[activeTab].columns = lastColumns;
                 tabs[activeTab].rows = lastRows;
+                tabs[activeTab].rawRows = lastRawRows;
                 tabs[activeTab].totalSize = msg.totalSize;
                 tabs[activeTab].hasResults = true;
                 persistState();

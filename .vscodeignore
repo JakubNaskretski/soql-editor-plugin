@@ -1,0 +1,20 @@
+# Development and local-only artifacts
+.git/**
+.github/**
+.vscode/**
+node_modules/**
+src/**
+examples/**
+docs/**
+releases/**
+
+# Tests and tooling config not required at runtime
+**/*.test.ts
+vitest.config.ts
+
+# Build/config scripts not needed in shipped VSIX
+install.sh
+tsconfig.json
+package-lock.json
+TODO.md
+.DS_Store

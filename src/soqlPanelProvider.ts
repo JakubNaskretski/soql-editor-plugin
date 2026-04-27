@@ -5,6 +5,7 @@ import { getPanelHtml } from './panelHtml';
 import { getSuggestions } from './panelSuggestions';
 import { validateSoqlStructure } from './soqlParser';
 import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
+import { flattenRecordForDisplay } from './resultFlattening';
 
 /**
  * Sidebar webview: SOQL textarea with inline suggestions + run button + results table.
@@ -230,32 +231,18 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
 
             const columns: string[] = [];
             const colSet = new Set<string>();
-            for (const rec of records) {
-                for (const key of Object.keys(rec)) {
-                    if (key !== 'attributes' && !colSet.has(key)) {
+            const rows = records.map(rec => {
+                const row = flattenRecordForDisplay(rec);
+                for (const key of Object.keys(row)) {
+                    if (!colSet.has(key)) {
                         colSet.add(key);
                         columns.push(key);
-                    }
-                }
-            }
-
-            // Flatten nested objects for display
-            const rows = records.map(rec => {
-                const row: Record<string, string> = {};
-                for (const col of columns) {
-                    let val = rec[col];
-                    if (val === null || val === undefined) {
-                        row[col] = 'null';
-                    } else if (typeof val === 'object') {
-                        row[col] = JSON.stringify(val);
-                    } else {
-                        row[col] = String(val);
                     }
                 }
                 return row;
             });
 
-            this.postMessage({ type: 'queryResults', columns, rows, totalSize });
+            this.postMessage({ type: 'queryResults', columns, rows, rawRows: records, totalSize });
         } catch (err: any) {
             this.outputChannel.appendLine(`Panel query error: ${err.message}`);
             this.postMessage({ type: 'error', message: err.message });

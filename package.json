@@ -2,8 +2,17 @@
   "name": "soql-editor",
   "displayName": "SOQL Editor",
   "description": "SOQL editor with autocomplete, validation, and multi-org query execution",
-  "version": "0.6.0",
-  "publisher": "vcs",
+  "version": "0.6.2",
+  "publisher": "Skrety",
+  "icon": "plugin-icon.png",
+  "keywords": [
+    "salesforce",
+    "soql",
+    "sf",
+    "sfdx",
+    "apex",
+    "crm"
+  ],
   "engines": {
     "vscode": "^1.105.0"
   },

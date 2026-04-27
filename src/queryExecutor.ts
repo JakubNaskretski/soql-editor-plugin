@@ -1,12 +1,13 @@
 import * as vscode from 'vscode';
 import { SfCliService } from './sfCliService';
 import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
+import { flattenRecordForDisplay } from './resultFlattening';
 
 /**
  * Executes SOQL queries and displays results in a webview panel.
  */
 export class QueryExecutor {
-    private static readonly MAX_RENDER_ROWS = 2000;
+    private static readonly MAX_RENDER_ROWS = 10000;
     private sfCli: SfCliService;
     private outputChannel: vscode.OutputChannel;
     private panel: vscode.WebviewPanel | undefined;
@@ -96,11 +97,13 @@ export class QueryExecutor {
             return;
         }
 
+        const displayRows = displayedRecords.map(flattenRecordForDisplay);
+
         // Collect all column names from records
         const columns = new Set<string>();
-        for (const rec of displayedRecords) {
+        for (const rec of displayRows) {
             for (const key of Object.keys(rec)) {
-                if (key !== 'attributes') {
+                if (!columns.has(key)) {
                     columns.add(key);
                 }
             }
@@ -121,7 +124,7 @@ export class QueryExecutor {
         }
 
         this.panel.title = `SOQL Results (${totalSize} records)`;
-        this.panel.webview.html = this.buildResultsHtml(query, columnList, displayedRecords, totalSize, truncated);
+        this.panel.webview.html = this.buildResultsHtml(query, columnList, displayRows, totalSize, truncated);
     }
 
     private buildResultsHtml(

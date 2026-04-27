@@ -141,8 +141,8 @@ for (const [weight, names] of WEIGHTED_GROUPS) {
 }
 
 
-/** Custom objects (__c) get a small boost over unweighted standard objects */
-const CUSTOM_OBJECT_WEIGHT = 10;
+/** Custom objects (__c) should rank above Service/Field Service tier objects */
+const CUSTOM_OBJECT_WEIGHT = 85;
 
 function getObjectWeight(name: string): number {
     return OBJECT_WEIGHTS[name] ?? (name.endsWith('__c') ? CUSTOM_OBJECT_WEIGHT : 0);
