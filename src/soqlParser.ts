@@ -99,7 +99,7 @@ export function getQueryContext(text: string, offset: number): QueryContext {
  * Extract the FROM object from a SOQL query string.
  */
 export function extractFromObject(text: string): string | undefined {
-    const match = text.match(/\bFROM\s+(\w+)/i);
+    const match = text.match(/\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)/i);
     return match ? match[1] : undefined;
 }
 
@@ -107,12 +107,91 @@ export function extractFromObject(text: string): string | undefined {
  * Extract SELECT field list from a SOQL query string.
  */
 export function extractSelectFields(text: string): string[] {
-    const match = text.match(/\bSELECT\s+([\s\S]*?)\bFROM\b/i);
-    if (!match) { return []; }
-    return match[1]
-        .split(',')
-        .map(f => f.trim())
-        .filter(f => f.length > 0);
+    const selectMatch = /\bSELECT\b/i.exec(text);
+    if (!selectMatch || selectMatch.index === undefined) { return []; }
+
+    const selectStart = selectMatch.index + selectMatch[0].length;
+    const fromIndex = findTopLevelFromIndex(text, selectStart);
+    if (fromIndex < 0) { return []; }
+
+    const selectClause = text.slice(selectStart, fromIndex);
+    return splitTopLevelCsv(selectClause);
+}
+
+function findTopLevelFromIndex(text: string, start: number): number {
+    let depth = 0;
+    let inString = false;
+
+    for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+            inString = !inString;
+            continue;
+        }
+        if (inString) { continue; }
+
+        if (ch === '(') {
+            depth++;
+            continue;
+        }
+        if (ch === ')' && depth > 0) {
+            depth--;
+            continue;
+        }
+        if (depth > 0) { continue; }
+
+        if ((ch === 'f' || ch === 'F') && text.slice(i, i + 4).toUpperCase() === 'FROM') {
+            const prev = i > 0 ? text[i - 1] : ' ';
+            const next = i + 4 < text.length ? text[i + 4] : ' ';
+            if (!/[A-Za-z0-9_]/.test(prev) && !/[A-Za-z0-9_]/.test(next)) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+function splitTopLevelCsv(input: string): string[] {
+    const parts: string[] = [];
+    let current = '';
+    let depth = 0;
+    let inString = false;
+
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+        if (ch === "'" && (i === 0 || input[i - 1] !== '\\')) {
+            inString = !inString;
+            current += ch;
+            continue;
+        }
+        if (!inString) {
+            if (ch === '(') {
+                depth++;
+                current += ch;
+                continue;
+            }
+            if (ch === ')' && depth > 0) {
+                depth--;
+                current += ch;
+                continue;
+            }
+            if (ch === ',' && depth === 0) {
+                const value = current.trim();
+                if (value.length > 0) {
+                    parts.push(value);
+                }
+                current = '';
+                continue;
+            }
+        }
+        current += ch;
+    }
+
+    const tail = current.trim();
+    if (tail.length > 0) {
+        parts.push(tail);
+    }
+    return parts;
 }
 
 /**
@@ -257,7 +336,7 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     // Duplicate fields in SELECT — e.g. "SELECT Name, Name FROM Account"
     if (selectToFrom && selectToFrom[1].trim().length > 0) {
         const selectStart = text.toUpperCase().indexOf('SELECT') + 6;
-        const fields = selectToFrom[1].split(',').map(f => f.trim()).filter(f => f.length > 0);
+        const fields = splitTopLevelCsv(selectToFrom[1]);
         const seen = new Map<string, number>(); // lowercase field -> first occurrence index
         for (let fi = 0; fi < fields.length; fi++) {
             // Skip aggregates, subqueries, FIELDS()

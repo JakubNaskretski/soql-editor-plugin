@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { execFile, execFileSync } from 'child_process';
+import { normalizeSObjectApiName } from './sobjectName';
+export { normalizeSObjectApiName } from './sobjectName';
 
 export interface OrgInfo {
     alias: string;
@@ -25,15 +27,6 @@ export interface SObjectDescribe {
     label: string;
     fields: SObjectField[];
     childRelationships: { childSObject: string; field: string; relationshipName: string }[];
-}
-
-const SOBJECT_API_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*(?:__(?:c|r|mdt|e|x))?$/;
-
-export function normalizeSObjectApiName(name: string): string | undefined {
-    const trimmed = name.trim();
-    if (!trimmed) { return undefined; }
-    if (!SOBJECT_API_NAME_RE.test(trimmed)) { return undefined; }
-    return trimmed;
 }
 
 /**
