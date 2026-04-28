@@ -32,6 +32,7 @@
     let validationTimer = null;
     let currentErrors = [];
     let lastCursorPos = -1;
+    let lastSuggestionRequest = null;
     let logCount = 0;
     let consoleOpen = false;
     let lastColumns = [];
@@ -266,9 +267,9 @@
     input.addEventListener('input', () => {
         navigating = false; // user typed — reset navigation state
         clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => requestSuggestions(), 400);
+        debounceTimer = setTimeout(() => requestSuggestions(), 180);
         clearTimeout(validationTimer);
-        validationTimer = setTimeout(() => requestValidation(), 500);
+        validationTimer = setTimeout(() => requestValidation(), 280);
     });
 
     // Hide dropdown on outside click
@@ -299,13 +300,29 @@
 
     function runQuery() {
         hideDropdown();
+        resultActions.classList.remove('visible');
+        resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
+        btnRun.disabled = true;
+        btnRun.textContent = 'Running...';
+        tabs[activeTab].hasResults = false;
+        persistState();
         vscode.postMessage({ type: 'executeQuery', query: input.value });
     }
 
     function requestSuggestions() {
         const offset = input.selectionStart || 0;
+        const text = input.value;
+        const prevChar = offset > 0 ? text[offset - 1] : '';
+        const nextChar = offset < text.length ? text[offset] : '';
+        const idCharRe = /[A-Za-z0-9_.]/;
+        // Do not suggest while editing in the middle of a token.
+        if (idCharRe.test(prevChar) && idCharRe.test(nextChar)) {
+            hideDropdown();
+            return;
+        }
         lastCursorPos = offset;
-        vscode.postMessage({ type: 'requestSuggestions', text: input.value, offset });
+        lastSuggestionRequest = { text, offset };
+        vscode.postMessage({ type: 'requestSuggestions', text, offset });
     }
 
     function requestValidation() {
@@ -315,16 +332,27 @@
     function acceptSuggestion(item) {
         const text = input.value;
         const offset = input.selectionStart || 0;
+        const idCharRe = /[A-Za-z0-9_.]/;
 
-        // Find the partial word before cursor
-        const before = text.substring(0, offset);
-        const partialMatch = before.match(/[a-zA-Z_][a-zA-Z0-9_.]*$/);
-        const partialLen = partialMatch ? partialMatch[0].length : 0;
+        // Replace the full token around the cursor (left + right),
+        // so accepting a suggestion in mid-word never leaves stale suffix text.
+        let start = offset;
+        while (start > 0 && idCharRe.test(text[start - 1])) {
+            start--;
+        }
+        let end = offset;
+        while (end < text.length && idCharRe.test(text[end])) {
+            end++;
+        }
 
-        const newText = text.substring(0, offset - partialLen) + item.insertText + text.substring(offset);
+        const newText = text.substring(0, start) + item.insertText + text.substring(end);
         input.value = newText;
-        const newPos = offset - partialLen + item.insertText.length;
+        const newPos = start + item.insertText.length;
         input.setSelectionRange(newPos, newPos);
+        // Keep overlay/state in sync after programmatic text update.
+        persistState();
+        highlightSoql();
+        requestValidation();
         input.focus();
         hideDropdown();
     }
@@ -431,6 +459,14 @@
         switch (msg.type) {
             case 'suggestions':
                 if (navigating) break; // don't reset selection while user is arrow-navigating
+                // Ignore stale responses; render only for the latest input/cursor state.
+                if (!lastSuggestionRequest) { break; }
+                if (
+                    input.value !== lastSuggestionRequest.text ||
+                    (input.selectionStart || 0) !== lastSuggestionRequest.offset
+                ) {
+                    break;
+                }
                 suggestions = msg.items || [];
                 selectedIdx = suggestions.length > 0 ? 0 : -1;
                 renderDropdown();
@@ -438,10 +474,14 @@
 
             case 'queryStarted':
                 resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
+                btnRun.disabled = true;
+                btnRun.textContent = 'Running...';
                 tabs[activeTab].hasResults = false;
                 break;
 
             case 'queryResults':
+                btnRun.disabled = false;
+                btnRun.textContent = '\u25B6 Run';
                 lastColumns = msg.columns;
                 lastRows = msg.rows;
                 lastRawRows = msg.rawRows || msg.rows || [];
@@ -456,12 +496,16 @@
                 break;
 
             case 'error':
+                btnRun.disabled = false;
+                btnRun.textContent = '\u25B6 Run';
                 resultsArea.innerHTML = '<div class="error-msg">&#10060; ' + esc(msg.message) + '</div>';
                 tabs[activeTab].hasResults = false;
                 persistState();
                 break;
 
             case 'info':
+                btnRun.disabled = false;
+                btnRun.textContent = '\u25B6 Run';
                 resultsArea.innerHTML = '<div class="info-msg">' + esc(msg.message) + '</div>';
                 break;
 

@@ -2,7 +2,7 @@
   "name": "soql-editor",
   "displayName": "SOQL Editor",
   "description": "SOQL editor with autocomplete, validation, and multi-org query execution",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "keywords": [
@@ -106,10 +106,12 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && node ./scripts/copy-panel-js.mjs",
     "watch": "tsc -watch -p ./",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "package:dev": "node ./scripts/package-vsix.mjs dev",
+    "package:store": "node ./scripts/package-vsix.mjs store"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

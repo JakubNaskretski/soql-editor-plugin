@@ -6,6 +6,7 @@ import { getSuggestions } from './panelSuggestions';
 import { validateSoqlStructure } from './soqlParser';
 import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
 import { flattenRecordForDisplay } from './resultFlattening';
+import { PANEL_LOCAL_RESOURCE_ROOT } from './webviewAssets';
 
 /**
  * Sidebar webview: SOQL textarea with inline suggestions + run button + results table.
@@ -34,7 +35,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         this.view = webviewView;
         webviewView.webview.options = {
             enableScripts: true,
-            localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'out')]
+            localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, PANEL_LOCAL_RESOURCE_ROOT)]
         };
         this.outputChannel.appendLine('resolveWebviewView called, setting HTML');
         webviewView.webview.html = getPanelHtml(webviewView.webview, this.extensionUri);
@@ -193,6 +194,10 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
             return;
         }
 
+        // Notify UI immediately so users get instant feedback on Run/Cmd+Enter,
+        // even while preflight checks are still running.
+        this.postMessage({ type: 'queryStarted' });
+
         // Safety: if no LIMIT, run a COUNT() first to warn the user
         if (!hasLimitClause(query)) {
             const countQuery = buildCountQuery(query);
@@ -221,8 +226,6 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                 }
             }
         }
-
-        this.postMessage({ type: 'queryStarted' });
 
         try {
             const result = await this.sfCli.executeQuery(query);

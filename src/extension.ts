@@ -30,9 +30,15 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    let firstOrgNotificationPending = true;
+
     // Notify panel when org changes
-    orgPicker.onOrgChanged((org) => {
+    orgPicker.onOrgChanged(async (org) => {
         panelProvider.notifyOrgChanged(org);
+
+        const promptType: 'startup' | 'switch' = firstOrgNotificationPending ? 'startup' : 'switch';
+        firstOrgNotificationPending = false;
+        await maybePromptForMetadataReadiness(metadata, promptType);
     });
 
     // Auto-select default org (after listener is registered)
@@ -176,6 +182,60 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Offer to migrate legacy .soql-cache to globalStorage
     migrateLegacyCache(context.globalStorageUri.fsPath, context.globalState, outputChannel);
+}
+
+async function maybePromptForMetadataReadiness(
+    metadata: MetadataProvider,
+    promptType: 'startup' | 'switch'
+) {
+    const status = metadata.getCurrentOrgCacheStatus();
+    if (status.hasCache) { return; }
+
+    const otherCaches = metadata.listOtherCachedOrgKeys();
+    const hasOtherCaches = otherCaches.length > 0;
+
+    const title = promptType === 'startup'
+        ? 'SOQL Editor: Metadata cache is empty for this org. Autocomplete may be limited until metadata is downloaded.'
+        : 'SOQL Editor: This org has no metadata cache yet. Autocomplete may be limited.';
+
+    const actions = hasOtherCaches
+        ? ['Download Common Metadata', 'Download All Metadata', 'Reuse Other Org Cache', 'Later']
+        : ['Download Common Metadata', 'Download All Metadata', 'Later'];
+
+    const choice = await vscode.window.showInformationMessage(title, ...actions);
+    if (!choice || choice === 'Later') { return; }
+
+    if (choice === 'Download Common Metadata') {
+        await vscode.commands.executeCommand('soqlEditor.syncCommonMetadata');
+        return;
+    }
+
+    if (choice === 'Download All Metadata') {
+        await vscode.commands.executeCommand('soqlEditor.syncMetadata');
+        return;
+    }
+
+    if (choice === 'Reuse Other Org Cache') {
+        const picked = await vscode.window.showQuickPick(
+            otherCaches.map(key => ({
+                label: key,
+                detail: 'Reuse cached metadata files from this org cache',
+            })),
+            { placeHolder: 'Select cache source org' }
+        );
+        if (!picked) { return; }
+
+        const copied = metadata.bootstrapCurrentOrgCacheFrom(picked.label);
+        if (copied > 0) {
+            vscode.window.showInformationMessage(
+                `SOQL Editor: Reused ${copied} cached metadata files from ${picked.label}`
+            );
+        } else {
+            vscode.window.showWarningMessage(
+                'SOQL Editor: Could not reuse cache files. Try Download Common Metadata instead.'
+            );
+        }
+    }
 }
 
 /**

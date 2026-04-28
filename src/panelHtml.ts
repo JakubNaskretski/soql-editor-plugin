@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
+import { PANEL_SCRIPT_RELATIVE_PATH } from './webviewAssets';
 
 export function getPanelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(extensionUri, 'out', 'panel.js')
+        vscode.Uri.joinPath(extensionUri, ...PANEL_SCRIPT_RELATIVE_PATH)
     );
     return /*html*/ `<!DOCTYPE html>
 <html lang="en">
@@ -102,6 +103,8 @@ body {
     min-height: 100px;
     max-height: 50vh;
     border-bottom: 1px solid var(--vscode-panel-border);
+    overflow: hidden;
+    z-index: 1;
 }
 #highlightOverlay {
     position: absolute;
@@ -124,7 +127,7 @@ body {
     position: relative;
     width: 100%; height: 100%;
     min-height: 100px;
-    resize: vertical;
+    resize: none;
     background: transparent;
     color: transparent;
     caret-color: var(--vscode-editor-foreground);
@@ -165,6 +168,9 @@ body {
     max-height: 80px;
     overflow-y: auto;
     background: var(--vscode-sideBar-background);
+    position: relative;
+    z-index: 3;
+    flex-shrink: 0;
 }
 .error-list.visible { display: block; }
 .error-item {
@@ -359,13 +365,13 @@ body {
     <button class="org-label" id="orgLabel" title="Click to change org">No Org</button>
 </div>
 
+<div class="error-list" id="errorList"></div>
 <div class="editor-wrapper">
     <div id="highlightOverlay"></div>
     <textarea id="soqlInput" spellcheck="false"
         placeholder="SELECT Id, Name FROM Account LIMIT 10"></textarea>
 </div>
 <div class="ac-dropdown" id="acDropdown"></div>
-<div class="error-list" id="errorList"></div>
 
 <div class="result-actions" id="resultActions">
     <button id="btnCopyResults" title="Copy results to clipboard (tab-separated)">Copy Results</button>

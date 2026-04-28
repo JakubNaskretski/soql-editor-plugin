@@ -9,8 +9,6 @@ It provides:
 - multi-org query execution through Salesforce CLI (`sf`)
 - sidebar query panel with tabs, autocomplete, and result actions
 
-Current extension version: `0.6.2`
-
 ---
 
 ## Features
@@ -66,14 +64,13 @@ Install `SOQL Editor` from the marketplace once published.
 
 ```bash
 npm install
-npm run compile
-npx @vscode/vsce package --allow-missing-repository
+npm run package:dev
 ```
 
 2. Install in Cursor:
 
 ```bash
-cursor --install-extension soql-editor-0.6.1.vsix --force
+cursor --install-extension ./soql-editor-dev-<version>.vsix --force
 ```
 
 3. Reload window (`Developer: Reload Window`).
@@ -160,8 +157,7 @@ Update `version` in `package.json` (SemVer).
 ```bash
 npm install
 npm run test
-npm run compile
-npx @vscode/vsce package --allow-missing-repository
+npm run package:store
 ```
 
 ### Publish to marketplace
@@ -170,7 +166,24 @@ npx @vscode/vsce package --allow-missing-repository
 npx @vscode/vsce publish
 ```
 
-Use your publisher credentials/token configured for `vcs`.
+Use your publisher credentials/token configured for your publisher (for example `Skrety`).
+
+### Dev vs Store packaging model
+
+- `npm run package:dev` creates a local test VSIX with isolated identity:
+  - name: `soql-editor-dev`
+  - publisher: `Skrety-dev`
+  - display name: `SOQL Editor (Dev)`
+- `npm run package:store` creates the normal marketplace package from the canonical manifest.
+- The packaging script always restores the original `package.json` after building.
+
+### Recommended branch flow
+
+1. Create a feature/testing branch (for example `feat/autocomplete-fixes`).
+2. Iterate and test in Cursor with `npm run package:dev`.
+3. Merge branch into main only after validation.
+4. Build release artifact with `npm run package:store`.
+5. Publish from main with `npx @vscode/vsce publish`.
 
 ---
 

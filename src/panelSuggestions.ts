@@ -8,6 +8,34 @@ export interface Suggestion {
     insertText: string;
 }
 
+const IDENTIFIER_CHAR_RE = /[A-Za-z0-9_.]/;
+
+function isIdentifierChar(ch: string | undefined): boolean {
+    return !!ch && IDENTIFIER_CHAR_RE.test(ch);
+}
+
+function getWordAtCursor(text: string, offset: number): { word: string; start: number; end: number } {
+    let start = offset;
+    while (start > 0 && isIdentifierChar(text[start - 1])) {
+        start--;
+    }
+
+    let end = offset;
+    while (end < text.length && isIdentifierChar(text[end])) {
+        end++;
+    }
+
+    return {
+        word: text.slice(start, end),
+        start,
+        end,
+    };
+}
+
+function isCursorInsideIdentifier(text: string, offset: number): boolean {
+    return isIdentifierChar(text[offset - 1]) && isIdentifierChar(text[offset]);
+}
+
 /**
  * Popularity weights for commonly-queried standard Salesforce objects.
  * Higher weight = higher priority in autocomplete results.
@@ -153,14 +181,25 @@ export async function getSuggestions(
     offset: number,
     metadata: MetadataProvider,
 ): Promise<Suggestion[]> {
+    // Do not suggest while cursor is in the middle of an existing token.
+    // This avoids noisy suggestions and bad replacement behavior.
+    if (isCursorInsideIdentifier(text, offset)) {
+        return [];
+    }
+
     const ctx = getQueryContext(text, offset);
     let suggestions: Suggestion[] = [];
+    const wordAtCursor = getWordAtCursor(text, offset);
 
     switch (ctx.type) {
         case 'from_object': {
             if (ctx.partial.length < 1) { break; }
             const objects = await metadata.getObjectList();
             const lower = ctx.partial.toLowerCase();
+            const isCompletedObject = wordAtCursor.word.length > 0
+                && wordAtCursor.end === offset
+                && objects.some(name => name.toLowerCase() === wordAtCursor.word.toLowerCase());
+            if (isCompletedObject) { break; }
             const starts = objects.filter(n => n.toLowerCase().startsWith(lower));
             const contains = objects.filter(n => !n.toLowerCase().startsWith(lower) && n.toLowerCase().includes(lower));
             // Sort each group by popularity weight (descending), then alphabetically
@@ -187,6 +226,10 @@ export async function getSuggestions(
                     suggestions = await getRelationshipFieldSuggestions(obj, dotParts, metadata);
                 } else {
                     suggestions = await getDirectFieldSuggestions(obj, ctx.partial, metadata);
+                }
+                const isFinishedToken = wordAtCursor.word.length > 0 && wordAtCursor.end === offset;
+                if (isFinishedToken) {
+                    suggestions = suggestions.filter(s => s.label.toLowerCase() !== wordAtCursor.word.toLowerCase());
                 }
             }
             break;

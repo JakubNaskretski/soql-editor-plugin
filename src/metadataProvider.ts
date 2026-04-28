@@ -143,13 +143,124 @@ export class MetadataProvider {
     private getCacheDir(): string | undefined {
         const org = this.sfCli.getCurrentOrg();
         if (!org) { return undefined; }
+        return path.join(this.getCacheRootDir(), this.sanitizeOrgCacheKey(org.alias));
+    }
 
-        const cacheDir = path.join(
-            this.globalStoragePath,
-            'cache',
-            org.alias.replace(/[^a-zA-Z0-9_.-]/g, '_')
-        );
-        return cacheDir;
+    private getCacheRootDir(): string {
+        return path.join(this.globalStoragePath, 'cache');
+    }
+
+    private sanitizeOrgCacheKey(name: string): string {
+        return name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    }
+
+    /**
+     * Returns a quick cache status summary for the currently selected org.
+     * "hasCache" means at least one object describe file or an object-list snapshot exists.
+     */
+    getCurrentOrgCacheStatus(): { hasCache: boolean; hasObjectList: boolean; objectFileCount: number } {
+        const cacheDir = this.getCacheDir();
+        if (!cacheDir || !fs.existsSync(cacheDir)) {
+            return { hasCache: false, hasObjectList: false, objectFileCount: 0 };
+        }
+
+        let hasObjectList = false;
+        let objectFileCount = 0;
+        try {
+            const files = fs.readdirSync(cacheDir, { withFileTypes: true });
+            for (const entry of files) {
+                if (!entry.isFile()) { continue; }
+                if (entry.name === '_objectList.json') {
+                    hasObjectList = true;
+                    continue;
+                }
+                if (entry.name.endsWith('.json')) {
+                    objectFileCount++;
+                }
+            }
+        } catch {
+            return { hasCache: false, hasObjectList: false, objectFileCount: 0 };
+        }
+
+        return {
+            hasCache: hasObjectList || objectFileCount > 0,
+            hasObjectList,
+            objectFileCount,
+        };
+    }
+
+    /**
+     * Lists other org cache directories that appear to contain usable cache files.
+     * Returned values are cache directory keys (sanitized org aliases).
+     */
+    listOtherCachedOrgKeys(): string[] {
+        const root = this.getCacheRootDir();
+        if (!fs.existsSync(root)) { return []; }
+
+        const currentOrg = this.sfCli.getCurrentOrg();
+        const currentKey = currentOrg ? this.sanitizeOrgCacheKey(currentOrg.alias) : undefined;
+
+        try {
+            const dirs = fs.readdirSync(root, { withFileTypes: true })
+                .filter(d => d.isDirectory())
+                .map(d => d.name)
+                .filter(name => name !== currentKey);
+
+            return dirs.filter(name => {
+                const dirPath = path.join(root, name);
+                try {
+                    const files = fs.readdirSync(dirPath);
+                    return files.some(f => f === '_objectList.json' || f.endsWith('.json'));
+                } catch {
+                    return false;
+                }
+            });
+        } catch {
+            return [];
+        }
+    }
+
+    /**
+     * Copies cached metadata files from another org cache directory into the current org cache directory.
+     * Existing files are preserved and not overwritten.
+     */
+    bootstrapCurrentOrgCacheFrom(otherOrgKey: string): number {
+        const sourceKey = this.sanitizeOrgCacheKey(otherOrgKey);
+        const destDir = this.getCacheDir();
+        if (!destDir) { return 0; }
+
+        const root = path.resolve(this.getCacheRootDir());
+        const sourceDir = path.resolve(root, sourceKey);
+        const resolvedDest = path.resolve(destDir);
+        if (!sourceDir.startsWith(root + path.sep) || !resolvedDest.startsWith(root + path.sep)) {
+            return 0;
+        }
+        if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
+            return 0;
+        }
+        if (sourceDir === resolvedDest) {
+            return 0;
+        }
+
+        fs.mkdirSync(resolvedDest, { recursive: true });
+        let copied = 0;
+
+        for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+            if (!entry.isFile()) { continue; }
+            if (!entry.name.endsWith('.json')) { continue; }
+
+            const src = path.join(sourceDir, entry.name);
+            const dst = path.join(resolvedDest, entry.name);
+            if (fs.existsSync(dst)) { continue; }
+            try {
+                fs.copyFileSync(src, dst);
+                copied++;
+            } catch {
+                // Ignore per-file copy failures and continue.
+            }
+        }
+
+        return copied;
     }
 
     private loadFromDiskCache(objectName: string): SObjectDescribe | undefined {
