@@ -203,7 +203,11 @@ body {
     display: flex; justify-content: space-between; align-items: center;
     font-size: 12px;
 }
-.ac-item:hover, .ac-item.selected {
+.ac-item:hover {
+    background: var(--vscode-list-hoverBackground);
+    color: var(--vscode-foreground);
+}
+.ac-item.selected {
     background: var(--vscode-list-activeSelectionBackground);
     color: var(--vscode-list-activeSelectionForeground);
 }

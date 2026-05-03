@@ -24,7 +24,7 @@ describe('flattenRecordForDisplay', () => {
         });
     });
 
-    it('keeps child subquery payloads as compact json', () => {
+    it('expands child subquery payloads into readable columns', () => {
         const record = {
             Name: 'Acme',
             Contacts: {
@@ -39,9 +39,10 @@ describe('flattenRecordForDisplay', () => {
 
         const flattened = flattenRecordForDisplay(record);
         expect(flattened.Name).toBe('Acme');
-        expect(flattened.Contacts).toContain('"totalSize":2');
-        expect(flattened.Contacts).toContain('"records"');
-        expect(flattened).not.toHaveProperty('Contacts.records.0.LastName');
+        expect(flattened['Contacts.totalSize']).toBe('2');
+        expect(flattened['Contacts.done']).toBe('true');
+        expect(flattened['Contacts[0].LastName']).toBe('Doe');
+        expect(flattened['Contacts[1].LastName']).toBe('Roe');
     });
 
     it('normalizes null/undefined and handles empty nested objects', () => {

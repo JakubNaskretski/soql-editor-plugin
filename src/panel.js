@@ -128,6 +128,10 @@
 
     function closeTab(idx) {
         if (tabs.length <= 1) return;
+        // Persist the active tab's current input before mutating the array,
+        // otherwise restoreTab(activeTab) below can overwrite freshly-typed
+        // text with a stale snapshot from the last input event.
+        saveCurrentTab();
         tabs.splice(idx, 1);
         if (activeTab >= tabs.length) {
             activeTab = tabs.length - 1;

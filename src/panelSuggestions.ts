@@ -1,7 +1,7 @@
 /** Computes context-aware autocomplete suggestions for the sidebar editor. */
 import { MetadataProvider } from './metadataProvider';
 import { SObjectDescribe } from './sfCliService';
-import { getQueryContext, extractFromObject, extractScopedFromInfo, ScopedFromInfo } from './soqlParser';
+import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset, ScopedFromInfo } from './soqlParser';
 
 export interface Suggestion {
     label: string;
@@ -258,6 +258,11 @@ export async function getSuggestions(
     switch (ctx.type) {
         case 'from_object': {
             if (ctx.partial.length < 1) { break; }
+            const scoped = extractScopedFromInfo(text, offset);
+            if (scoped && scoped.depth > 0) {
+                suggestions = await getSubqueryFromSuggestions(text, scoped, ctx.partial, metadata);
+                break;
+            }
             const objects = await metadata.getObjectList();
             const lower = ctx.partial.toLowerCase();
             const isCompletedObject = wordAtCursor.word.length > 0
@@ -380,6 +385,77 @@ export async function getSuggestions(
     return suggestions;
 }
 
+async function getSubqueryFromSuggestions(
+    text: string,
+    scoped: ScopedFromInfo,
+    partial: string,
+    metadata: MetadataProvider
+): Promise<Suggestion[]> {
+    const parentScoped = extractScopedFromInfo(text, scoped.selectIndex);
+    let parentObj: string | undefined;
+    if (parentScoped) {
+        parentObj = await resolveScopeObject(parentScoped, text, metadata, new Map<number, string | undefined>());
+    } else {
+        // While users type an incomplete inner query (e.g. missing `)`),
+        // scope extraction for the parent may fail. Fall back to the last FROM token.
+        parentObj = extractLastFromObject(text);
+    }
+    if (!parentObj) {
+        return [];
+    }
+
+    const parentDescribe = await metadata.describeSObject(parentObj);
+    if (!parentDescribe) {
+        return [];
+    }
+
+    const lower = partial.toLowerCase();
+    const relationships = parentDescribe.childRelationships
+        .filter(rel => !!rel.relationshipName)
+        .map(rel => ({ relationshipName: rel.relationshipName!, childSObject: rel.childSObject }));
+
+    const scored = relationships.map(r => {
+        const relLower = r.relationshipName.toLowerCase();
+        const childLower = r.childSObject.toLowerCase();
+        let score = -1;
+        if (relLower.startsWith(lower)) {
+            score = 0;
+        } else if (childLower.startsWith(lower)) {
+            score = 1;
+        } else if (relLower.includes(lower)) {
+            score = 2;
+        } else if (childLower.includes(lower)) {
+            score = 3;
+        }
+        return { ...r, score };
+    }).filter(r => r.score >= 0);
+
+    scored.sort((a, b) => {
+        if (a.score !== b.score) {
+            return a.score - b.score;
+        }
+        return a.relationshipName.localeCompare(b.relationshipName);
+    });
+
+    return scored
+        .slice(0, 25)
+        .map(r => ({
+            label: r.relationshipName,
+            detail: `Child relationship (${r.childSObject})`,
+            insertText: r.relationshipName,
+        }));
+}
+
+function extractLastFromObject(text: string): string | undefined {
+    const re = /\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
+    let m: RegExpExecArray | null = null;
+    let last: string | undefined;
+    while ((m = re.exec(text)) !== null) {
+        last = m[1];
+    }
+    return last;
+}
+
 async function resolveContextObject(
     text: string,
     offset: number,
@@ -387,6 +463,11 @@ async function resolveContextObject(
 ): Promise<string | undefined> {
     const scoped = extractScopedFromInfo(text, offset);
     if (!scoped) {
+        // Inside a subquery scope with no resolved FROM yet: avoid falling back
+        // to outer-object fields, which creates misleading suggestions.
+        if (getQueryDepthAtOffset(text, offset) > 0) {
+            return undefined;
+        }
         return extractFromObject(text);
     }
     const memo = new Map<number, string | undefined>();

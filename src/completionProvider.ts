@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { getQueryContext, extractFromObject } from './soqlParser';
+import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset } from './soqlParser';
 import { MetadataProvider } from './metadataProvider';
 import {
     SOQL_AGGREGATE_FUNCTIONS,
@@ -46,16 +46,16 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
             case 'where_field':
             case 'order_by':
             case 'group_by':
-                return this.getFieldCompletions(text, ctx.partial);
+                return this.getFieldCompletions(text, offset, ctx.partial);
 
             case 'where_operator':
                 return this.getOperatorCompletions(ctx.partial);
 
             case 'where_value':
-                return this.getValueCompletions(text, ctx.field);
+                return this.getValueCompletions(text, offset, ctx.field);
 
             case 'having':
-                return this.getHavingCompletions(text, ctx.partial);
+                return this.getHavingCompletions(text, offset, ctx.partial);
 
             case 'order_direction':
                 return this.getKeywordItems(this.filterByPartial(['ASC', 'DESC'], ctx.partial), vscode.CompletionItemKind.EnumMember);
@@ -107,8 +107,8 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         });
     }
 
-    private async getFieldCompletions(queryText: string, partial: string): Promise<vscode.CompletionItem[]> {
-        const objectName = extractFromObject(queryText);
+    private async getFieldCompletions(queryText: string, offset: number, partial: string): Promise<vscode.CompletionItem[]> {
+        const objectName = await this.resolveScopedObject(queryText, offset);
         if (!objectName) {
             return [];
         }
@@ -213,8 +213,8 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         });
     }
 
-    private async getValueCompletions(queryText: string, fieldName: string): Promise<vscode.CompletionItem[]> {
-        const objectName = extractFromObject(queryText);
+    private async getValueCompletions(queryText: string, offset: number, fieldName: string): Promise<vscode.CompletionItem[]> {
+        const objectName = await this.resolveScopedObject(queryText, offset);
         if (!objectName) { return []; }
 
         const describe = await this.metadata.describeSObject(objectName);
@@ -277,7 +277,7 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         });
     }
 
-    private async getHavingCompletions(queryText: string, partial: string): Promise<vscode.CompletionItem[]> {
+    private async getHavingCompletions(queryText: string, offset: number, partial: string): Promise<vscode.CompletionItem[]> {
         const items: vscode.CompletionItem[] = [];
         const filteredAggs = this.filterByPartial([...SOQL_AGGREGATE_FUNCTIONS], partial);
         items.push(...this.getKeywordItems(filteredAggs, vscode.CompletionItemKind.Function));
@@ -285,13 +285,49 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         items.push(...this.getKeywordItems(this.filterByPartial([...SOQL_BOOLEAN_LITERALS], partial), vscode.CompletionItemKind.Value));
 
         // Also suggest grouped fields
-        const fieldItems = await this.getFieldCompletions(queryText, partial);
+        const fieldItems = await this.getFieldCompletions(queryText, offset, partial);
         items.push(...fieldItems);
 
         return items.slice(0, 60).map((item, i) => {
             item.sortText = String(i).padStart(4, '0');
             return item;
         });
+    }
+
+    /**
+     * Resolve the SObject name for the query scope at the given cursor offset.
+     * - Top-level scope returns the FROM SObject directly.
+     * - Subquery scope (depth > 0) resolves the relationship name through the
+     *   parent's childRelationships to find the actual child SObject.
+     * - When inside a subquery scope but the parent SObject is unknown,
+     *   returns undefined to avoid suggesting fields from the wrong object.
+     */
+    private async resolveScopedObject(text: string, offset: number): Promise<string | undefined> {
+        const scoped = extractScopedFromInfo(text, offset);
+        if (!scoped) {
+            if (getQueryDepthAtOffset(text, offset) > 0) {
+                return undefined;
+            }
+            return extractFromObject(text);
+        }
+        if (scoped.depth <= 0) {
+            return scoped.fromName;
+        }
+        const parentScoped = extractScopedFromInfo(text, scoped.selectIndex);
+        if (!parentScoped) {
+            return scoped.fromName;
+        }
+        const parentObj = parentScoped.depth <= 0
+            ? parentScoped.fromName
+            : await this.resolveScopedObject(text, parentScoped.selectIndex);
+        if (!parentObj) {
+            return scoped.fromName;
+        }
+        const parentDescribe = await this.metadata.describeSObject(parentObj);
+        const childRel = parentDescribe?.childRelationships.find(
+            rel => rel.relationshipName?.toLowerCase() === scoped.fromName.toLowerCase()
+        );
+        return childRel?.childSObject || scoped.fromName;
     }
 
     private getTailClauseCompletions(partial: string): vscode.CompletionItem[] {

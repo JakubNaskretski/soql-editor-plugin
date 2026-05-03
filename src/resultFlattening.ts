@@ -28,9 +28,9 @@ function flattenValue(out: DisplayRow, keyPath: string, value: any): void {
         return;
     }
 
-    // Child subquery payloads can be large (records arrays). Keep as compact JSON.
+    // Child subquery payloads: expand into readable columns.
     if (Array.isArray((value as any).records)) {
-        out[keyPath] = JSON.stringify(value);
+        flattenChildSubquery(out, keyPath, value as { totalSize?: unknown; done?: unknown; records?: unknown[] });
         return;
     }
 
@@ -42,5 +42,36 @@ function flattenValue(out: DisplayRow, keyPath: string, value: any): void {
 
     for (const [childKey, childValue] of entries) {
         flattenValue(out, `${keyPath}.${childKey}`, childValue);
+    }
+}
+
+function flattenChildSubquery(
+    out: DisplayRow,
+    keyPath: string,
+    payload: { totalSize?: unknown; done?: unknown; records?: unknown[] }
+): void {
+    const records = Array.isArray(payload.records) ? payload.records : [];
+    out[`${keyPath}.totalSize`] = String(payload.totalSize ?? records.length);
+    out[`${keyPath}.done`] = String(payload.done ?? false);
+
+    if (records.length === 0) {
+        out[`${keyPath}[0]`] = 'null';
+        return;
+    }
+
+    for (let i = 0; i < records.length; i++) {
+        const rec = records[i];
+        if (!rec || typeof rec !== 'object') {
+            out[`${keyPath}[${i}]`] = String(rec);
+            continue;
+        }
+        const entries = Object.entries(rec).filter(([k]) => k !== 'attributes');
+        if (entries.length === 0) {
+            out[`${keyPath}[${i}]`] = '{}';
+            continue;
+        }
+        for (const [childKey, childValue] of entries) {
+            flattenValue(out, `${keyPath}[${i}].${childKey}`, childValue);
+        }
     }
 }
