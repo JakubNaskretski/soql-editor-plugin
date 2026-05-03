@@ -356,6 +356,11 @@
         requestValidation();
         input.focus();
         hideDropdown();
+        // If a relationship path segment was just inserted (ending in "."),
+        // immediately request the next level fields to keep chaining fluid.
+        if (item && typeof item.insertText === 'string' && item.insertText.endsWith('.')) {
+            setTimeout(() => requestSuggestions(), 0);
+        }
     }
 
     function getCursorXY(textarea, position) {
@@ -469,7 +474,9 @@
                     break;
                 }
                 suggestions = msg.items || [];
-                selectedIdx = suggestions.length > 0 ? 0 : -1;
+                // Do not auto-highlight any suggestion.
+                // Selection should only happen via explicit keyboard/mouse navigation.
+                selectedIdx = -1;
                 renderDropdown();
                 break;
 

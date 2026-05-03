@@ -13,6 +13,13 @@ export interface ParsedQuery {
     context: QueryContext;
 }
 
+export interface ScopedFromInfo {
+    fromName: string;
+    depth: number;
+    selectIndex: number;
+    fromIndex: number;
+}
+
 export type QueryContext =
     | { type: 'select_fields'; partial: string }
     | { type: 'from_object'; partial: string }
@@ -160,6 +167,132 @@ export function extractFromObject(text: string): string | undefined {
 }
 
 /**
+ * Resolve the FROM token for the query scope active at the cursor offset.
+ * This is subquery-aware by tracking parenthesis depth.
+ */
+export function extractScopedFromInfo(text: string, offset: number): ScopedFromInfo | undefined {
+    const safeOffset = Math.max(0, Math.min(offset, text.length));
+    const tokens = scanSelectFromTokens(text);
+    const currentDepth = getDepthAtOffset(text, safeOffset);
+
+    const selectToken = findCurrentSelectToken(tokens, safeOffset, currentDepth);
+    if (!selectToken) {
+        return undefined;
+    }
+    const fromToken = tokens.find(t =>
+        t.keyword === 'FROM' &&
+        t.depth === selectToken.depth &&
+        t.index > selectToken.index
+    );
+    if (!fromToken) {
+        return undefined;
+    }
+    const fromName = readIdentifierAfter(text, fromToken.index + 4);
+    if (!fromName) {
+        return undefined;
+    }
+    return {
+        fromName,
+        depth: selectToken.depth,
+        selectIndex: selectToken.index,
+        fromIndex: fromToken.index,
+    };
+}
+
+function readIdentifierAfter(text: string, index: number): string | undefined {
+    let i = index;
+    while (i < text.length && /\s/.test(text[i])) {
+        i++;
+    }
+    const m = text.slice(i).match(/^([A-Za-z_][A-Za-z0-9_]*)/);
+    return m ? m[1] : undefined;
+}
+
+function getDepthAtOffset(text: string, offset: number): number {
+    let depth = 0;
+    let inString = false;
+    for (let i = 0; i < offset && i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+            inString = !inString;
+            continue;
+        }
+        if (inString) {
+            continue;
+        }
+        if (ch === '(') {
+            depth++;
+        } else if (ch === ')' && depth > 0) {
+            depth--;
+        }
+    }
+    return depth;
+}
+
+function findCurrentSelectToken(
+    tokens: Array<{ keyword: 'SELECT' | 'FROM'; index: number; depth: number }>,
+    offset: number,
+    depth: number
+): { keyword: 'SELECT' | 'FROM'; index: number; depth: number } | undefined {
+    const sameDepthList = tokens.filter(t => t.keyword === 'SELECT' && t.index < offset && t.depth === depth);
+    const sameDepth = sameDepthList.length > 0 ? sameDepthList[sameDepthList.length - 1] : undefined;
+    if (sameDepth) {
+        return sameDepth;
+    }
+    // Fallback for cases where cursor sits exactly on/near scope boundaries.
+    const anyDepth = tokens.filter(t => t.keyword === 'SELECT' && t.index < offset);
+    return anyDepth.length > 0 ? anyDepth[anyDepth.length - 1] : undefined;
+}
+
+function scanSelectFromTokens(text: string): Array<{ keyword: 'SELECT' | 'FROM'; index: number; depth: number }> {
+    const tokens: Array<{ keyword: 'SELECT' | 'FROM'; index: number; depth: number }> = [];
+    let depth = 0;
+    let inString = false;
+    const upper = text.toUpperCase();
+
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+            inString = !inString;
+            continue;
+        }
+        if (inString) {
+            continue;
+        }
+
+        if (ch === '(') {
+            depth++;
+            continue;
+        }
+        if (ch === ')') {
+            depth = Math.max(0, depth - 1);
+            continue;
+        }
+
+        if (isWordTokenAt(upper, i, 'SELECT')) {
+            tokens.push({ keyword: 'SELECT', index: i, depth });
+            i += 'SELECT'.length - 1;
+            continue;
+        }
+        if (isWordTokenAt(upper, i, 'FROM')) {
+            tokens.push({ keyword: 'FROM', index: i, depth });
+            i += 'FROM'.length - 1;
+            continue;
+        }
+    }
+    return tokens;
+}
+
+function isWordTokenAt(textUpper: string, index: number, token: 'SELECT' | 'FROM'): boolean {
+    if (!textUpper.startsWith(token, index)) {
+        return false;
+    }
+    const prev = index > 0 ? textUpper[index - 1] : ' ';
+    const next = index + token.length < textUpper.length ? textUpper[index + token.length] : ' ';
+    return !/[A-Z0-9_]/.test(prev) && !/[A-Z0-9_]/.test(next);
+}
+
+/**
  * Extract SELECT field list from a SOQL query string.
  */
 export function extractSelectFields(text: string): string[] {
@@ -270,39 +403,6 @@ export interface SoqlError {
 
 export function validateSoqlStructure(text: string): SoqlError[] {
     const errors: SoqlError[] = [];
-    const upper = text.toUpperCase().trim();
-
-    if (!upper.startsWith('SELECT')) {
-        errors.push({
-            message: 'Query must start with SELECT',
-            line: 0,
-            startCol: 0,
-            endCol: Math.min(6, text.length),
-        });
-    }
-
-    if (!/\bFROM\b/i.test(text)) {
-        errors.push({
-            message: 'Query must include a FROM clause',
-            line: 0,
-            startCol: 0,
-            endCol: text.length,
-        });
-    }
-
-    // Check FROM has an object name after it
-    const fromMatch = text.match(/\bFROM\s*$/i);
-    if (fromMatch) {
-        const idx = text.toUpperCase().lastIndexOf('FROM');
-        const line = text.substring(0, idx).split('\n').length - 1;
-        const lineStart = text.lastIndexOf('\n', idx) + 1;
-        errors.push({
-            message: 'FROM clause requires an object name',
-            line,
-            startCol: idx - lineStart,
-            endCol: idx - lineStart + 4,
-        });
-    }
 
     // Check unmatched parentheses
     let depth = 0;
@@ -346,19 +446,8 @@ export function validateSoqlStructure(text: string): SoqlError[] {
         });
     }
 
-    // Empty SELECT clause — e.g. "SELECT FROM Account"
+    // SELECT clause checks
     const selectToFrom = text.match(/\bSELECT\s+([\s\S]*?)\bFROM\b/i);
-    if (selectToFrom && selectToFrom[1].trim().length === 0) {
-        const idx = text.toUpperCase().indexOf('SELECT');
-        const line = text.substring(0, idx).split('\n').length - 1;
-        const lineStart = text.lastIndexOf('\n', idx) + 1;
-        errors.push({
-            message: 'SELECT clause is empty',
-            line,
-            startCol: idx - lineStart,
-            endCol: idx - lineStart + 6,
-        });
-    }
 
     // Trailing comma before FROM — e.g. "SELECT Name, FROM Account"
     if (selectToFrom && /,\s*$/.test(selectToFrom[1])) {
@@ -447,42 +536,6 @@ export function validateSoqlStructure(text: string): SoqlError[] {
             startCol: idx - lineStart,
             endCol: idx - lineStart + 2,
         });
-    }
-
-    // LIMIT must be a positive integer
-    const limitMatch = text.match(/\bLIMIT\s+(\S+)/i);
-    if (limitMatch) {
-        const val = limitMatch[1];
-        if (!/^\d+$/.test(val) || parseInt(val, 10) <= 0) {
-            const idx = text.toUpperCase().indexOf('LIMIT');
-            const valStart = idx + limitMatch[0].indexOf(val);
-            const line = text.substring(0, valStart).split('\n').length - 1;
-            const lineStart = text.lastIndexOf('\n', valStart) + 1;
-            errors.push({
-                message: 'LIMIT must be a positive integer',
-                line,
-                startCol: valStart - lineStart,
-                endCol: valStart - lineStart + val.length,
-            });
-        }
-    }
-
-    // OFFSET must be a non-negative integer
-    const offsetMatch = text.match(/\bOFFSET\s+(\S+)/i);
-    if (offsetMatch) {
-        const val = offsetMatch[1];
-        if (!/^\d+$/.test(val)) {
-            const idx = text.toUpperCase().indexOf('OFFSET');
-            const valStart = idx + offsetMatch[0].indexOf(val);
-            const line = text.substring(0, valStart).split('\n').length - 1;
-            const lineStart = text.lastIndexOf('\n', valStart) + 1;
-            errors.push({
-                message: 'OFFSET must be a non-negative integer',
-                line,
-                startCol: valStart - lineStart,
-                endCol: valStart - lineStart + val.length,
-            });
-        }
     }
 
     // HAVING without GROUP BY

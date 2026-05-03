@@ -132,6 +132,12 @@
           "minimum": 0,
           "maximum": 3,
           "description": "How many retries to attempt for transient describe failures."
+        },
+        "soqlEditor.slowQueryWarningThreshold": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 0,
+          "description": "Show the long-running query warning when COUNT() is above this record threshold. Set to 0 to warn for any positive count."
         }
       }
     }

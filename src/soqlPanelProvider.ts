@@ -27,6 +27,17 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         this.extensionUri = extensionUri;
     }
 
+    private getSlowQueryWarningThreshold(): number {
+        const configured = vscode.workspace
+            .getConfiguration('soqlEditor')
+            .get<number>('slowQueryWarningThreshold', 5000);
+        if (!Number.isFinite(configured)) {
+            return 5000;
+        }
+        const normalized = Math.floor(configured);
+        return Math.max(0, normalized);
+    }
+
     resolveWebviewView(
         webviewView: vscode.WebviewView,
         _context: vscode.WebviewViewResolveContext,
@@ -213,7 +224,8 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                 try {
                     const countResult = await this.sfCli.executeQuery(countQuery);
                     const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
-                    if (shouldPromptForCount(totalRows)) {
+                    const threshold = this.getSlowQueryWarningThreshold();
+                    if (shouldPromptForCount(totalRows, threshold)) {
                         const choice = await vscode.window.showWarningMessage(
                             `Query matches ${totalRows} records. Run it?`,
                             { modal: false },

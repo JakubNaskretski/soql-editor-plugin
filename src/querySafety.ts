@@ -21,8 +21,8 @@ export function applyLimit(query: string, limit: number): string {
     return query.replace(/\s*;?\s*$/, '') + ` LIMIT ${limit}`;
 }
 
-export function shouldPromptForCount(totalRows: unknown): boolean {
+export function shouldPromptForCount(totalRows: unknown, threshold: number = AUTO_EXECUTE_COUNT_THRESHOLD): boolean {
     const rowCount = typeof totalRows === 'number' ? totalRows : parseInt(String(totalRows), 10);
     if (Number.isNaN(rowCount)) { return true; }
-    return rowCount > AUTO_EXECUTE_COUNT_THRESHOLD;
+    return rowCount > threshold;
 }

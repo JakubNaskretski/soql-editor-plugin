@@ -21,4 +21,9 @@ describe('query safety helpers', () => {
         expect(shouldPromptForCount(5001)).toBe(true);
         expect(shouldPromptForCount('?')).toBe(true);
     });
+
+    it('uses configured warning threshold when provided', () => {
+        expect(shouldPromptForCount(100, 50)).toBe(true);
+        expect(shouldPromptForCount(100, 500)).toBe(false);
+    });
 });

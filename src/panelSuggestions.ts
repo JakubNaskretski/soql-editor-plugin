@@ -1,7 +1,7 @@
 /** Computes context-aware autocomplete suggestions for the sidebar editor. */
 import { MetadataProvider } from './metadataProvider';
 import { SObjectDescribe } from './sfCliService';
-import { getQueryContext, extractFromObject } from './soqlParser';
+import { getQueryContext, extractFromObject, extractScopedFromInfo, ScopedFromInfo } from './soqlParser';
 
 export interface Suggestion {
     label: string;
@@ -177,6 +177,68 @@ function getObjectWeight(name: string): number {
     return OBJECT_WEIGHTS[name] ?? (name.endsWith('__c') ? CUSTOM_OBJECT_WEIGHT : 0);
 }
 
+function stripManagedNamespace(segment: string): string {
+    return segment.replace(/^[A-Za-z0-9]+__([A-Za-z0-9_]+__(?:r|c))$/i, '$1');
+}
+
+function truncateMiddle(value: string, maxLen: number): string {
+    if (value.length <= maxLen) {
+        return value;
+    }
+    const headLen = Math.max(10, Math.floor(maxLen * 0.6));
+    const tailLen = Math.max(8, maxLen - headLen - 3);
+    return `${value.slice(0, headLen)}...${value.slice(-tailLen)}`;
+}
+
+function toRelationshipDisplayLabel(fullPath: string): string {
+    const parts = fullPath
+        .split('.')
+        .map(stripManagedNamespace);
+
+    // Keep short labels untouched.
+    const joined = parts.join('.');
+    const maxLen = 46;
+    if (joined.length <= maxLen) {
+        return joined;
+    }
+
+    // For deep paths, preserve the nearest relationship/field context (last 2 parts)
+    // and shorten earlier chain parts first.
+    if (parts.length >= 3) {
+        const tail = parts.slice(-2); // e.g. CreatedBy.FirstName
+        const head = parts.slice(0, -2);
+
+        const shortenedHead = head.map(p => (p.length > 12 ? `${p.slice(0, 12)}...` : p));
+        let candidateParts = [...shortenedHead, ...tail];
+        if (candidateParts.join('.').length <= maxLen) {
+            return candidateParts.join('.');
+        }
+
+        // Collapse older path segments from the left into a single ellipsis,
+        // while keeping the most recent relationship segment(s) readable.
+        while (shortenedHead.length > 1 && candidateParts.join('.').length > maxLen) {
+            shortenedHead.shift();
+            if (shortenedHead[0] !== '...') {
+                shortenedHead[0] = '...';
+            }
+            candidateParts = [...shortenedHead, ...tail];
+        }
+
+        const candidate = candidateParts.join('.');
+        if (candidate.length <= maxLen) {
+            return candidate;
+        }
+
+        // As a final fallback, keep only "...<nearest>.<field>".
+        const fallback = ['...', ...tail].join('.');
+        if (fallback.length <= maxLen) {
+            return fallback;
+        }
+    }
+
+    return truncateMiddle(joined, maxLen);
+}
+
 export async function getSuggestions(
     text: string,
     offset: number,
@@ -191,6 +253,7 @@ export async function getSuggestions(
     const ctx = getQueryContext(text, offset);
     let suggestions: Suggestion[] = [];
     const wordAtCursor = getWordAtCursor(text, offset);
+    const contextObject = await resolveContextObject(text, offset, metadata);
 
     switch (ctx.type) {
         case 'from_object': {
@@ -220,7 +283,7 @@ export async function getSuggestions(
         case 'order_by':
         case 'group_by': {
             if (ctx.partial.length < 1) { break; }
-            const obj = extractFromObject(text);
+            const obj = contextObject;
             if (obj) {
                 const dotParts = ctx.partial.split('.');
                 if (dotParts.length > 1) {
@@ -230,13 +293,13 @@ export async function getSuggestions(
                 }
                 const isFinishedToken = wordAtCursor.word.length > 0 && wordAtCursor.end === offset;
                 if (isFinishedToken) {
-                    suggestions = suggestions.filter(s => s.label.toLowerCase() !== wordAtCursor.word.toLowerCase());
+                    suggestions = suggestions.filter(s => s.insertText.toLowerCase() !== wordAtCursor.word.toLowerCase());
                 }
             }
             break;
         }
         case 'where_value': {
-            const obj = extractFromObject(text);
+            const obj = contextObject;
             if (obj) {
                 const desc = await metadata.describeSObject(obj);
                 if (desc) {
@@ -300,8 +363,9 @@ export async function getSuggestions(
                 : havingSuggestions;
             // Also suggest fields from the object
             const obj = extractFromObject(text);
-            if (obj && ctx.partial.length >= 1) {
-                const fieldSugs = await getDirectFieldSuggestions(obj, ctx.partial, metadata);
+            const ctxObj = contextObject || obj;
+            if (ctxObj && ctx.partial.length >= 1) {
+                const fieldSugs = await getDirectFieldSuggestions(ctxObj, ctx.partial, metadata);
                 suggestions = [...suggestions, ...fieldSugs];
             }
             break;
@@ -314,6 +378,54 @@ export async function getSuggestions(
     }
 
     return suggestions;
+}
+
+async function resolveContextObject(
+    text: string,
+    offset: number,
+    metadata: MetadataProvider
+): Promise<string | undefined> {
+    const scoped = extractScopedFromInfo(text, offset);
+    if (!scoped) {
+        return extractFromObject(text);
+    }
+    const memo = new Map<number, string | undefined>();
+    return resolveScopeObject(scoped, text, metadata, memo);
+}
+
+async function resolveScopeObject(
+    scoped: ScopedFromInfo,
+    text: string,
+    metadata: MetadataProvider,
+    memo: Map<number, string | undefined>
+): Promise<string | undefined> {
+    if (memo.has(scoped.selectIndex)) {
+        return memo.get(scoped.selectIndex);
+    }
+
+    if (scoped.depth <= 0) {
+        memo.set(scoped.selectIndex, scoped.fromName);
+        return scoped.fromName;
+    }
+
+    const parentScoped = extractScopedFromInfo(text, scoped.selectIndex);
+    if (!parentScoped) {
+        memo.set(scoped.selectIndex, scoped.fromName);
+        return scoped.fromName;
+    }
+    const parentObj = await resolveScopeObject(parentScoped, text, metadata, memo);
+    if (!parentObj) {
+        memo.set(scoped.selectIndex, scoped.fromName);
+        return scoped.fromName;
+    }
+
+    const parentDescribe = await metadata.describeSObject(parentObj);
+    const childRel = parentDescribe?.childRelationships.find(rel =>
+        rel.relationshipName?.toLowerCase() === scoped.fromName.toLowerCase()
+    );
+    const resolved = childRel?.childSObject || scoped.fromName;
+    memo.set(scoped.selectIndex, resolved);
+    return resolved;
 }
 
 async function resolveRelationshipChain(
@@ -351,21 +463,25 @@ async function getRelationshipFieldSuggestions(
 
     const suggestions: Suggestion[] = [...starts, ...contains]
         .slice(0, 20)
-        .map(f => ({
-            label: prefix + f.name,
-            detail: `${f.type}${f.nillable ? ' (nullable)' : ''} (${resolved.name})`,
-            insertText: prefix + f.name,
-        }));
+        .map(f => {
+            const full = prefix + f.name;
+            return {
+                label: f.name,
+                detail: `${f.type}${f.nillable ? ' (nullable)' : ''} (${resolved.name})`,
+                insertText: full,
+            };
+        });
 
     const relFields = resolved.fields.filter(f =>
         f.relationshipName &&
         (!fieldPartial || f.relationshipName.toLowerCase().startsWith(fieldPartial) || f.relationshipName.toLowerCase().includes(fieldPartial))
     );
     for (const f of relFields.slice(0, 5)) {
+        const full = prefix + f.relationshipName! + '.';
         suggestions.push({
-            label: prefix + f.relationshipName! + '.',
+            label: `${f.relationshipName!}.`,
             detail: `-> ${f.referenceTo.join(', ')}`,
-            insertText: prefix + f.relationshipName! + '.',
+            insertText: full,
         });
     }
 
@@ -400,11 +516,12 @@ async function getDirectFieldSuggestions(
             (f.relationshipName.toLowerCase().startsWith(lower) || f.relationshipName.toLowerCase().includes(lower))
         );
         for (const f of relFields.slice(0, 5)) {
-            if (!suggestions.some(s => s.label === f.relationshipName + '.')) {
+            const full = f.relationshipName! + '.';
+            if (!suggestions.some(s => s.insertText === full)) {
                 suggestions.push({
-                    label: f.relationshipName! + '.',
+                    label: toRelationshipDisplayLabel(full),
                     detail: `-> ${f.referenceTo.join(', ')}`,
-                    insertText: f.relationshipName! + '.',
+                    insertText: full,
                 });
             }
         }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractFromObject, extractSelectFields, getQueryContext } from './soqlParser';
+import { extractFromObject, extractScopedFromInfo, extractSelectFields, getQueryContext } from './soqlParser';
 
 describe('extractFromObject', () => {
     it('extracts simple object names', () => {
@@ -9,6 +9,23 @@ describe('extractFromObject', () => {
 
     it('returns undefined when FROM is absent', () => {
         expect(extractFromObject('SELECT Id, Name')).toBeUndefined();
+    });
+});
+
+describe('extractScopedFromInfo', () => {
+    it('resolves top-level FROM object', () => {
+        const query = 'SELECT Id FROM Account WHERE Name != null';
+        const info = extractScopedFromInfo(query, query.length);
+        expect(info?.fromName).toBe('Account');
+        expect(info?.depth).toBe(0);
+    });
+
+    it('resolves child relationship FROM inside subquery scope', () => {
+        const query = 'SELECT Id, (SELECT LastName FROM Contacts WHERE LastName != null) FROM Account';
+        const cursor = query.indexOf('LastName != null') + 6;
+        const info = extractScopedFromInfo(query, cursor);
+        expect(info?.fromName).toBe('Contacts');
+        expect(info?.depth).toBe(1);
     });
 });
 
