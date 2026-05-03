@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractFromObject, extractSelectFields } from './soqlParser';
+import { extractFromObject, extractSelectFields, getQueryContext } from './soqlParser';
 
 describe('extractFromObject', () => {
     it('extracts simple object names', () => {
@@ -26,5 +26,49 @@ describe('extractSelectFields', () => {
     it('does not split commas inside subquery fields', () => {
         const query = 'SELECT Id, (SELECT LastName, Email FROM Contacts), Name FROM Account';
         expect(extractSelectFields(query)).toEqual(['Id', '(SELECT LastName, Email FROM Contacts)', 'Name']);
+    });
+});
+
+describe('getQueryContext', () => {
+    it('detects FROM object typing', () => {
+        const query = 'SELECT Id FROM Con';
+        const ctx = getQueryContext(query, query.length);
+        expect(ctx).toEqual({ type: 'from_object', partial: 'Con' });
+    });
+
+    it('detects ORDER BY direction context', () => {
+        const query = 'SELECT Id FROM Account ORDER BY Name D';
+        const ctx = getQueryContext(query, query.length);
+        expect(ctx).toEqual({ type: 'order_direction', partial: 'D' });
+    });
+
+    it('detects WITH clause context', () => {
+        const query = 'SELECT Id FROM Account WITH SEC';
+        const ctx = getQueryContext(query, query.length);
+        expect(ctx).toEqual({ type: 'with_clause', partial: 'SEC' });
+    });
+
+    it('detects FOR clause context', () => {
+        const query = 'SELECT Id FROM Account FOR UP';
+        const ctx = getQueryContext(query, query.length);
+        expect(ctx).toEqual({ type: 'for_clause', partial: 'UP' });
+    });
+
+    it('detects tail clause after completed WHERE value', () => {
+        const query = "SELECT Id FROM Account WHERE Name = 'Acme' G";
+        const ctx = getQueryContext(query, query.length);
+        expect(ctx).toEqual({ type: 'tail_clause', partial: 'G' });
+    });
+
+    it('keeps WHERE field context after AND', () => {
+        const query = "SELECT Id FROM Account WHERE Name = 'Acme' AND ";
+        const ctx = getQueryContext(query, query.length);
+        expect(ctx).toEqual({ type: 'where_field', partial: '' });
+    });
+
+    it('keeps WHERE field context while typing field after AND', () => {
+        const query = "SELECT Id FROM Account WHERE Name = 'Acme' AND Na";
+        const ctx = getQueryContext(query, query.length);
+        expect(ctx).toEqual({ type: 'where_field', partial: 'Na' });
     });
 });

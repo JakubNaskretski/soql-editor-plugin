@@ -69,14 +69,17 @@ export class OrgPicker {
         }
     }
 
-    async autoSelectDefault(): Promise<void> {
+    async autoSelectDefault(preferredUsername?: string): Promise<void> {
         try {
             const orgs = await this.sfCli.listOrgs();
-            const defaultOrg = orgs.find(o => o.isDefault);
-            if (defaultOrg) {
-                this.sfCli.setCurrentOrg(defaultOrg);
+            const preferredOrg = preferredUsername
+                ? orgs.find(o => o.username.toLowerCase() === preferredUsername.toLowerCase())
+                : undefined;
+            const startupOrg = preferredOrg || orgs.find(o => o.isDefault);
+            if (startupOrg) {
+                this.sfCli.setCurrentOrg(startupOrg);
                 this.updateLabel();
-                this.onOrgChangedEmitter.fire(defaultOrg);
+                this.onOrgChangedEmitter.fire(startupOrg);
             }
         } catch {
             // Silently fail on startup — user can pick manually

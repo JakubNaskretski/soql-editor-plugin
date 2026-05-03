@@ -5,6 +5,7 @@
     { "include": "#strings" },
     { "include": "#keywords" },
     { "include": "#functions" },
+    { "include": "#relationships" },
     { "include": "#constants" },
     { "include": "#operators" }
   ],
@@ -14,6 +15,11 @@
         {
           "name": "comment.line.double-dash.soql",
           "match": "--.*$"
+        },
+        {
+          "name": "comment.block.soql",
+          "begin": "/\\*",
+          "end": "\\*/"
         }
       ]
     },
@@ -36,7 +42,7 @@
       "patterns": [
         {
           "name": "keyword.control.soql",
-          "match": "(?i)\\b(SELECT|FROM|WHERE|AND|OR|NOT|IN|LIKE|ORDER\\s+BY|GROUP\\s+BY|HAVING|LIMIT|OFFSET|ASC|DESC|NULLS\\s+FIRST|NULLS\\s+LAST|WITH|USING\\s+SCOPE|FOR\\s+VIEW|FOR\\s+REFERENCE|FOR\\s+UPDATE|INCLUDES|EXCLUDES|TYPEOF|WHEN|THEN|ELSE|END|ROLLUP|CUBE)\\b"
+          "match": "(?i)\\b(SELECT|FROM|WHERE|AND|OR|NOT|IN|LIKE|ORDER\\s+BY|GROUP\\s+BY|HAVING|LIMIT|OFFSET|ASC|DESC|NULLS\\s+FIRST|NULLS\\s+LAST|ALL\\s+ROWS|INCLUDES|EXCLUDES|TYPEOF|WHEN|THEN|ELSE|END|ROLLUP|CUBE)\\b"
         },
         {
           "name": "constant.language.null.soql",
@@ -53,6 +59,14 @@
         {
           "name": "support.function.aggregate.soql",
           "match": "(?i)\\b(COUNT|AVG|SUM|MIN|MAX|COUNT_DISTINCT|GROUPING|FORMAT|convertCurrency|toLabel|convertTimezone|CALENDAR_MONTH|CALENDAR_QUARTER|CALENDAR_YEAR|DAY_IN_MONTH|DAY_IN_WEEK|DAY_IN_YEAR|DAY_ONLY|FISCAL_MONTH|FISCAL_QUARTER|FISCAL_YEAR|HOUR_IN_DAY|WEEK_IN_MONTH|WEEK_IN_YEAR|FIELDS)\\b"
+        }
+      ]
+    },
+    "relationships": {
+      "patterns": [
+        {
+          "name": "variable.other.relationship-path.soql",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+\\b"
         }
       ]
     },

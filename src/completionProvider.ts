@@ -1,6 +1,18 @@
 import * as vscode from 'vscode';
 import { getQueryContext, extractFromObject } from './soqlParser';
 import { MetadataProvider } from './metadataProvider';
+import {
+    SOQL_AGGREGATE_FUNCTIONS,
+    SOQL_BOOLEAN_LITERALS,
+    SOQL_CLAUSE_KEYWORDS,
+    SOQL_DATE_LITERALS,
+    SOQL_FALLBACK_OBJECTS,
+    SOQL_LOGICAL_KEYWORDS,
+    SOQL_MISC_FUNCTIONS,
+    SOQL_OPERATORS,
+    SOQL_ORDERING_KEYWORDS,
+    rankByPartial,
+} from './soqlCatalog';
 
 /**
  * Provides inline autocomplete and suggestions for SOQL queries.
@@ -45,27 +57,48 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
             case 'having':
                 return this.getHavingCompletions(text, ctx.partial);
 
+            case 'order_direction':
+                return this.getKeywordItems(this.filterByPartial(['ASC', 'DESC'], ctx.partial), vscode.CompletionItemKind.EnumMember);
+
+            case 'nulls_order':
+                return this.getKeywordItems(
+                    this.filterByPartial(['NULLS FIRST', 'NULLS LAST'], ctx.partial),
+                    vscode.CompletionItemKind.EnumMember
+                );
+
+            case 'limit_value':
+                return this.getNumericSnippetCompletions('LIMIT');
+
+            case 'offset_value':
+                return this.getNumericSnippetCompletions('OFFSET');
+
+            case 'with_clause':
+                return this.getKeywordItems(
+                    this.filterByPartial(['SECURITY_ENFORCED'], ctx.partial),
+                    vscode.CompletionItemKind.Keyword
+                );
+
+            case 'for_clause':
+                return this.getKeywordItems(this.filterByPartial(['UPDATE'], ctx.partial), vscode.CompletionItemKind.Keyword);
+
+            case 'tail_clause':
+                return this.getTailClauseCompletions(ctx.partial);
+
             default:
                 return this.getKeywordCompletions();
         }
     }
 
     private async getObjectCompletions(partial: string): Promise<vscode.CompletionItem[]> {
-        if (partial.length < 1) { return []; } // require at least 1 char to search objects
-        const objects = await this.metadata.getObjectList();
-        const lower = partial.toLowerCase();
-
-        // Prioritize startsWith, then contains
-        const starts: string[] = [];
-        const contains: string[] = [];
-        for (const name of objects) {
-            const nl = name.toLowerCase();
-            if (nl.startsWith(lower)) { starts.push(name); }
-            else if (nl.includes(lower)) { contains.push(name); }
+        let objects = await this.metadata.getObjectList();
+        if (objects.length === 0) {
+            objects = [...SOQL_FALLBACK_OBJECTS];
         }
-        const matched = [...starts, ...contains].slice(0, 30);
 
-        return matched.map((name, i) => {
+        const ranked = rankByPartial(objects, name => name, partial, 30);
+        const matched = ranked.length > 0 || partial ? ranked : objects.slice(0, 30);
+
+        return matched.map((name, i): vscode.CompletionItem => {
             const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Class);
             item.detail = 'SObject';
             item.insertText = name;
@@ -86,22 +119,14 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         }
 
         const lower = partial.toLowerCase();
+        const matched = rankByPartial(describe.fields, field => field.name, partial, 25);
+        const items: vscode.CompletionItem[] = [];
+        const addedRelationshipNames = new Set<string>();
 
-        // Prioritize: startsWith first, then contains, cap at 25
-        const starts: typeof describe.fields = [];
-        const contains: typeof describe.fields = [];
-        for (const field of describe.fields) {
-            const fl = field.name.toLowerCase();
-            if (!partial) { starts.push(field); }
-            else if (fl.startsWith(lower)) { starts.push(field); }
-            else if (fl.includes(lower)) { contains.push(field); }
-        }
-        const matched = [...starts, ...contains].slice(0, 25);
-
-        const items: vscode.CompletionItem[] = matched.map((field, i) => {
-            const item = new vscode.CompletionItem(field.name, vscode.CompletionItemKind.Field);
-            item.detail = `${field.type}${field.nillable ? ' (nullable)' : ''}`;
-            item.documentation = new vscode.MarkdownString(
+        for (const field of matched) {
+            const fieldItem = new vscode.CompletionItem(field.name, vscode.CompletionItemKind.Field);
+            fieldItem.detail = `${field.type}${field.nillable ? ' (nullable)' : ''}`;
+            fieldItem.documentation = new vscode.MarkdownString(
                 `**${field.label}**\n\n` +
                 `- Type: \`${field.type}\`\n` +
                 `- API Name: \`${field.name}\`\n` +
@@ -112,10 +137,31 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
                     ? `- Relationship: \`${field.relationshipName}\`\n`
                     : '')
             );
-            item.insertText = field.name;
-            item.sortText = String(i).padStart(4, '0');
-            return item;
-        });
+            fieldItem.insertText = field.name;
+            items.push(fieldItem);
+
+            // Keep parent relationship traversal ranked with its foreign-key field.
+            if (partial.length >= 2 && field.relationshipName && field.referenceTo.length > 0) {
+                const relName = field.relationshipName;
+                const relKey = relName.toLowerCase();
+                const fieldMatches = !partial || field.name.toLowerCase().includes(lower);
+                const relMatches = relName.toLowerCase().startsWith(lower) || relName.toLowerCase().includes(lower);
+                if ((fieldMatches || relMatches) && !addedRelationshipNames.has(relKey)) {
+                    const relItem = new vscode.CompletionItem(
+                        relName + '.',
+                        vscode.CompletionItemKind.Reference
+                    );
+                    relItem.detail = `Relationship > ${field.referenceTo.join(', ')}`;
+                    relItem.insertText = relName + '.';
+                    relItem.command = {
+                        command: 'editor.action.triggerSuggest',
+                        title: 'Trigger Suggest',
+                    };
+                    items.push(relItem);
+                    addedRelationshipNames.add(relKey);
+                }
+            }
+        }
 
         // Only show relationships when partial is >= 2 chars
         if (partial.length >= 2) {
@@ -123,6 +169,10 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
                 if (field.relationshipName && field.referenceTo.length > 0) {
                     const relName = field.relationshipName;
                     if (!relName.toLowerCase().startsWith(lower) && !relName.toLowerCase().includes(lower)) {
+                        continue;
+                    }
+                    const relKey = relName.toLowerCase();
+                    if (addedRelationshipNames.has(relKey)) {
                         continue;
                     }
                     const item = new vscode.CompletionItem(
@@ -136,6 +186,7 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
                         title: 'Trigger Suggest',
                     };
                     items.push(item);
+                    addedRelationshipNames.add(relKey);
                 }
             }
 
@@ -156,7 +207,10 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
             }
         }
 
-        return items;
+        return items.map((item, i) => {
+            item.sortText = String(i).padStart(4, '0');
+            return item;
+        });
     }
 
     private async getValueCompletions(queryText: string, fieldName: string): Promise<vscode.CompletionItem[]> {
@@ -169,96 +223,116 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         const field = describe.fields.find(
             f => f.name.toLowerCase() === fieldName.toLowerCase()
         );
-        if (!field || field.picklistValues.length === 0) {
-            return [];
+        if (!field) {
+            return this.getKeywordItems(
+                [...SOQL_BOOLEAN_LITERALS, ...SOQL_DATE_LITERALS],
+                vscode.CompletionItemKind.Value
+            );
+        }
+        const items: vscode.CompletionItem[] = [];
+
+        if (field.picklistValues.length > 0) {
+            items.push(...field.picklistValues.map(pv => {
+                const item = new vscode.CompletionItem(
+                    pv.label,
+                    vscode.CompletionItemKind.EnumMember
+                );
+                item.detail = pv.value;
+                item.insertText = `'${pv.value}'`;
+                return item;
+            }));
         }
 
-        return field.picklistValues.map(pv => {
-            const item = new vscode.CompletionItem(
-                pv.label,
-                vscode.CompletionItemKind.EnumMember
-            );
-            item.detail = pv.value;
-            item.insertText = `'${pv.value}'`;
+        items.push(...this.getKeywordItems([...SOQL_BOOLEAN_LITERALS], vscode.CompletionItemKind.Value));
+
+        if (field.type === 'date' || field.type === 'datetime') {
+            items.push(...this.getKeywordItems(SOQL_DATE_LITERALS, vscode.CompletionItemKind.Value));
+        }
+
+        return items.map((item, i) => {
+            item.sortText = String(i).padStart(4, '0');
             return item;
         });
     }
 
     private getKeywordCompletions(): vscode.CompletionItem[] {
         const keywords = [
-            'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT', 'IN', 'LIKE',
-            'ORDER BY', 'GROUP BY', 'HAVING', 'LIMIT', 'OFFSET',
-            'ASC', 'DESC', 'NULLS FIRST', 'NULLS LAST',
-            'COUNT()', 'COUNT(Id)', 'AVG(', 'SUM(', 'MIN(', 'MAX(',
-            'FIELDS(ALL)', 'FIELDS(STANDARD)', 'FIELDS(CUSTOM)',
-            'TODAY', 'YESTERDAY', 'LAST_N_DAYS:',
+            ...SOQL_CLAUSE_KEYWORDS,
+            ...SOQL_LOGICAL_KEYWORDS,
+            ...SOQL_ORDERING_KEYWORDS,
+            ...SOQL_AGGREGATE_FUNCTIONS,
+            ...SOQL_MISC_FUNCTIONS,
+            ...SOQL_DATE_LITERALS,
         ];
-
-        return keywords.map(kw => {
-            const item = new vscode.CompletionItem(kw, vscode.CompletionItemKind.Keyword);
-            item.insertText = kw;
-            return item;
-        });
+        return this.getKeywordItems(keywords, vscode.CompletionItemKind.Keyword);
     }
 
     private getOperatorCompletions(partial: string): vscode.CompletionItem[] {
-        const operators = [
-            { label: '=', detail: 'Equals' },
-            { label: '!=', detail: 'Not equals' },
-            { label: '<', detail: 'Less than' },
-            { label: '>', detail: 'Greater than' },
-            { label: '<=', detail: 'Less than or equal' },
-            { label: '>=', detail: 'Greater than or equal' },
-            { label: 'LIKE', detail: 'Pattern match (%, _)' },
-            { label: 'IN', detail: 'In list of values' },
-            { label: 'NOT IN', detail: 'Not in list' },
-            { label: 'INCLUDES', detail: 'Multi-select includes' },
-            { label: 'EXCLUDES', detail: 'Multi-select excludes' },
-        ];
-
-        const lower = partial.toLowerCase();
-        const filtered = lower.length > 0
-            ? operators.filter(op => op.label.toLowerCase().startsWith(lower))
-            : operators;
-
+        const filtered = this.filterByPartial([...SOQL_OPERATORS], partial);
         return filtered.map((op, i) => {
-            const item = new vscode.CompletionItem(op.label, vscode.CompletionItemKind.Operator);
-            item.detail = op.detail;
-            item.insertText = op.label + ' ';
+            const item = new vscode.CompletionItem(op, vscode.CompletionItemKind.Operator);
+            item.insertText = op + ' ';
             item.sortText = String(i).padStart(4, '0');
             return item;
         });
     }
 
     private async getHavingCompletions(queryText: string, partial: string): Promise<vscode.CompletionItem[]> {
-        const aggregates = [
-            { label: 'COUNT()', detail: 'Aggregate' },
-            { label: 'COUNT(Id)', detail: 'Count of Id' },
-            { label: 'SUM(', detail: 'Aggregate' },
-            { label: 'AVG(', detail: 'Aggregate' },
-            { label: 'MIN(', detail: 'Aggregate' },
-            { label: 'MAX(', detail: 'Aggregate' },
-            { label: 'COUNT_DISTINCT(', detail: 'Aggregate' },
-        ];
-
-        const lower = partial.toLowerCase();
         const items: vscode.CompletionItem[] = [];
+        const filteredAggs = this.filterByPartial([...SOQL_AGGREGATE_FUNCTIONS], partial);
+        items.push(...this.getKeywordItems(filteredAggs, vscode.CompletionItemKind.Function));
+        items.push(...this.getOperatorCompletions(partial));
+        items.push(...this.getKeywordItems(this.filterByPartial([...SOQL_BOOLEAN_LITERALS], partial), vscode.CompletionItemKind.Value));
 
-        const filteredAggs = lower.length > 0
-            ? aggregates.filter(a => a.label.toLowerCase().startsWith(lower))
-            : aggregates;
-        for (const [i, agg] of filteredAggs.entries()) {
-            const item = new vscode.CompletionItem(agg.label, vscode.CompletionItemKind.Function);
-            item.detail = agg.detail;
-            item.insertText = agg.label;
-            item.sortText = String(i).padStart(4, '0');
-            items.push(item);
-        }
-
-        // Also suggest fields
+        // Also suggest grouped fields
         const fieldItems = await this.getFieldCompletions(queryText, partial);
         items.push(...fieldItems);
 
-        return items;
+        return items.slice(0, 60).map((item, i) => {
+            item.sortText = String(i).padStart(4, '0');
+            return item;
+        });
+    }
+
+    private getTailClauseCompletions(partial: string): vscode.CompletionItem[] {
+        const tailClauses = [
+            'GROUP BY',
+            'HAVING',
+            'ORDER BY',
+            'LIMIT',
+            'OFFSET',
+            'WITH SECURITY_ENFORCED',
+            'FOR UPDATE',
+        ];
+        const filtered = this.filterByPartial(tailClauses, partial);
+        return this.getKeywordItems(filtered, vscode.CompletionItemKind.Keyword);
+    }
+
+    private getNumericSnippetCompletions(kind: 'LIMIT' | 'OFFSET'): vscode.CompletionItem[] {
+        const defaults = kind === 'LIMIT' ? ['10', '50', '100', '200'] : ['0', '50', '100', '500'];
+        return defaults.map((value, i) => {
+            const item = new vscode.CompletionItem(
+                value,
+                vscode.CompletionItemKind.Value
+            );
+            item.detail = `${kind} value`;
+            item.insertText = value;
+            item.sortText = String(i).padStart(4, '0');
+            return item;
+        });
+    }
+
+    private getKeywordItems(values: readonly string[], kind: vscode.CompletionItemKind): vscode.CompletionItem[] {
+        return values.map((value, i) => {
+            const item = new vscode.CompletionItem(value, kind);
+            item.insertText = value;
+            item.sortText = String(i).padStart(4, '0');
+            return item;
+        });
+    }
+
+    private filterByPartial(values: readonly string[], partial: string): string[] {
+        const ranked = rankByPartial(values, v => v, partial, 50);
+        return ranked.length > 0 || partial ? ranked : [...values];
     }
 }

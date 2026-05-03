@@ -1,3 +1,4 @@
+/** Generates sidebar webview HTML shell and styling. */
 import * as vscode from 'vscode';
 import { PANEL_SCRIPT_RELATIVE_PATH } from './webviewAssets';
 
@@ -100,10 +101,12 @@ body {
 .editor-wrapper {
     position: relative;
     flex: 0 0 auto;
+    height: 180px;
     min-height: 100px;
-    max-height: 50vh;
+    max-height: 70vh;
+    resize: vertical;
     border-bottom: 1px solid var(--vscode-panel-border);
-    overflow: hidden;
+    overflow: auto;
     z-index: 1;
 }
 #highlightOverlay {
@@ -161,18 +164,20 @@ body {
 
 /* ── error list ────────────────────────── */
 .error-list {
-    display: none;
+    display: block;
     padding: 4px 8px;
     border-bottom: 1px solid var(--vscode-panel-border);
     font-size: 11px;
+    min-height: 28px;
     max-height: 80px;
     overflow-y: auto;
     background: var(--vscode-sideBar-background);
     position: relative;
     z-index: 3;
     flex-shrink: 0;
+    visibility: hidden;
 }
-.error-list.visible { display: block; }
+.error-list.visible { visibility: visible; }
 .error-item {
     padding: 2px 0;
     color: var(--vscode-errorForeground, #f44747);

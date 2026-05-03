@@ -1,3 +1,4 @@
+/** VS Code extension activation and top-level service wiring. */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -10,6 +11,7 @@ import { SoqlPanelProvider } from './soqlPanelProvider';
 import { MetadataProvider } from './metadataProvider';
 
 const SOQL_SELECTOR: vscode.DocumentSelector = { language: 'soql', scheme: 'file' };
+const LAST_SELECTED_ORG_KEY = 'soqlEditor.lastSelectedOrgUsername';
 
 export function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('SOQL Editor');
@@ -34,6 +36,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Notify panel when org changes
     orgPicker.onOrgChanged(async (org) => {
+        await context.globalState.update(LAST_SELECTED_ORG_KEY, org.username);
         panelProvider.notifyOrgChanged(org);
 
         const promptType: 'startup' | 'switch' = firstOrgNotificationPending ? 'startup' : 'switch';
@@ -42,7 +45,8 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     // Auto-select default org (after listener is registered)
-    orgPicker.autoSelectDefault();
+    const lastSelectedOrg = context.globalState.get<string>(LAST_SELECTED_ORG_KEY);
+    orgPicker.autoSelectDefault(lastSelectedOrg);
 
     // Autocomplete
     const completionProvider = new SoqlCompletionProvider(metadata);

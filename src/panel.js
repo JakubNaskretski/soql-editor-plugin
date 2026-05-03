@@ -1,3 +1,4 @@
+/** Sidebar webview client script: tabs, autocomplete, highlighting, and results UI. */
 (function() {
     document.getElementById('jsCheck').style.display = 'none';
     try {

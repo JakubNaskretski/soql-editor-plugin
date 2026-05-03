@@ -1,3 +1,4 @@
+/** Flattens nested Salesforce query records into table-ready key/value rows. */
 export type DisplayRow = Record<string, string>;
 
 export function flattenRecordForDisplay(record: any): DisplayRow {

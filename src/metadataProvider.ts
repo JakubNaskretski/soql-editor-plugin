@@ -3,23 +3,26 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { SfCliService, SObjectDescribe, SObjectField, normalizeSObjectApiName } from './sfCliService';
 import { LocalProjectScanner } from './localProjectScanner';
+import { SOQL_FALLBACK_OBJECTS } from './soqlCatalog';
 
 /**
- * Resolves SObject metadata from multiple sources in priority order:
+ * Resolves SObject metadata from multiple sources.
  *
- * 1. Local SFDX project (objects/fields dirs) - instant, matches what you deploy
- * 2. Disk cache (globalStorage/cache/orgAlias/Object.json) - persists across restarts
- * 3. Live CLI describe (sf sobject describe) - freshest but slowest
+ * Object list (`getObjectList`): short-lived in-memory cache, then merge of
+ * (org names from disk `_objectList.json` or `sf sobject list`) with local
+ * SFDX object folder names; if empty, falls back to `SOQL_FALLBACK_OBJECTS`.
  *
- * Source 1 contains only custom fields + a handful of standard fields.
- * Sources 2 and 3 are a full describe. When source 1 is available, we merge it
- * with 2/3 so you get both standard AND custom fields.
+ * Per-object describe (`describeSObject`): (1) in-memory cache in SfCliService,
+ * (2) disk cache JSON per org, (3) live `sf sobject describe`, (4) local project
+ * only if describe fails. When (1)–(3) succeed, local field XML is merged on top
+ * so workspace changes override the cached/org describe for matching field names.
  */
 export class MetadataProvider {
     private sfCli: SfCliService;
     private localScanner: LocalProjectScanner;
     private outputChannel: vscode.OutputChannel;
     private globalStoragePath: string;
+    private objectListCache: { value: string[]; expiresAt: number } | undefined;
 
     constructor(sfCli: SfCliService, outputChannel: vscode.OutputChannel, globalStoragePath: string) {
         this.sfCli = sfCli;
@@ -28,11 +31,24 @@ export class MetadataProvider {
         this.globalStoragePath = globalStoragePath;
     }
 
+    private getCacheMaxAgeMs(): number | undefined {
+        const expiryDays = vscode.workspace
+            .getConfiguration('soqlEditor')
+            .get<number>('cacheExpiryDays', 0);
+        if (expiryDays <= 0) {
+            return undefined;
+        }
+        return expiryDays * 24 * 60 * 60 * 1000;
+    }
+
     /**
      * Get object list -- merges local project objects + org objects.
      * Caches the org object list to disk for fast startup.
      */
     async getObjectList(): Promise<string[]> {
+        if (this.objectListCache && Date.now() < this.objectListCache.expiresAt) {
+            return this.objectListCache.value;
+        }
         const localObjects = this.localScanner.getLocalObjectNames();
 
         // Try disk-cached object list first
@@ -48,8 +64,18 @@ export class MetadataProvider {
         for (const name of localObjects) {
             merged.add(name);
         }
+        if (merged.size === 0) {
+            for (const name of SOQL_FALLBACK_OBJECTS) {
+                merged.add(name);
+            }
+        }
 
-        return Array.from(merged).sort();
+        const list = Array.from(merged).sort();
+        this.objectListCache = {
+            value: list,
+            expiresAt: Date.now() + 30_000,
+        };
+        return list;
     }
 
     private loadObjectListFromDisk(): string[] | undefined {
@@ -59,7 +85,8 @@ export class MetadataProvider {
         if (!fs.existsSync(filePath)) { return undefined; }
         try {
             const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-            if (data._cachedAt && Date.now() - data._cachedAt > 7 * 24 * 60 * 60 * 1000) {
+            const maxAgeMs = this.getCacheMaxAgeMs();
+            if (maxAgeMs !== undefined && data._cachedAt && Date.now() - data._cachedAt > maxAgeMs) {
                 return undefined; // expired
             }
             return data.objects;
@@ -275,10 +302,11 @@ export class MetadataProvider {
             const content = fs.readFileSync(filePath, 'utf-8');
             const cached = JSON.parse(content);
 
-            // Check freshness — auto-expire after 7 days
-            if (cached._cachedAt) {
+            // Check freshness when configured by the user.
+            const maxAgeMs = this.getCacheMaxAgeMs();
+            if (maxAgeMs !== undefined && cached._cachedAt) {
                 const age = Date.now() - cached._cachedAt;
-                if (age > 7 * 24 * 60 * 60 * 1000) {
+                if (age > maxAgeMs) {
                     this.outputChannel.appendLine(`Cache expired for ${objectName}`);
                     return undefined;
                 }
@@ -333,10 +361,14 @@ export class MetadataProvider {
         const filePath = this.getSafeObjectCachePath(cacheDir, objectName);
         if (!filePath) { return false; }
         if (!fs.existsSync(filePath)) { return false; }
+        const maxAgeMs = this.getCacheMaxAgeMs();
+        if (maxAgeMs === undefined) {
+            return true;
+        }
         try {
             const stat = fs.statSync(filePath);
             const age = Date.now() - stat.mtimeMs;
-            return age < 7 * 24 * 60 * 60 * 1000;
+            return age < maxAgeMs;
         } catch { return false; }
     }
 
@@ -471,6 +503,7 @@ export class MetadataProvider {
         } catch (err: any) {
             this.outputChannel.appendLine(`Error clearing cache: ${err.message}`);
         }
+        this.objectListCache = undefined;
     }
 
     private getSafeObjectCachePath(cacheDir: string, objectName: string): string | undefined {

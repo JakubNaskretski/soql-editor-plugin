@@ -1,3 +1,5 @@
+import { SOQL_ALL_KEYWORDS } from './soqlCatalog';
+
 /**
  * Minimal SOQL parser — extracts structural tokens from a SOQL query
  * to support autocomplete and validation.
@@ -18,17 +20,18 @@ export type QueryContext =
     | { type: 'where_operator'; field: string; partial: string }
     | { type: 'where_value'; field: string; partial: string }
     | { type: 'order_by'; partial: string }
+    | { type: 'order_direction'; partial: string }
+    | { type: 'nulls_order'; partial: string }
     | { type: 'group_by'; partial: string }
     | { type: 'having'; partial: string }
+    | { type: 'limit_value'; partial: string }
+    | { type: 'offset_value'; partial: string }
+    | { type: 'with_clause'; partial: string }
+    | { type: 'for_clause'; partial: string }
+    | { type: 'tail_clause'; partial: string }
     | { type: 'unknown' };
 
-const KEYWORDS = new Set([
-    'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT', 'IN', 'LIKE',
-    'ORDER', 'BY', 'GROUP', 'HAVING', 'LIMIT', 'OFFSET', 'ASC', 'DESC',
-    'NULLS', 'FIRST', 'LAST', 'WITH', 'USING', 'SCOPE', 'FOR',
-    'INCLUDES', 'EXCLUDES', 'TYPEOF', 'WHEN', 'THEN', 'ELSE', 'END',
-    'ROLLUP', 'CUBE', 'NULL', 'TRUE', 'FALSE', 'UPDATE', 'VIEW', 'REFERENCE',
-]);
+const KEYWORDS = new Set(SOQL_ALL_KEYWORDS.map(k => k.toUpperCase()));
 
 /**
  * Determine what context the cursor is in within the SOQL query.
@@ -40,6 +43,37 @@ export function getQueryContext(text: string, offset: number): QueryContext {
     // Get the partial word being typed
     const partialMatch = beforeRaw.match(/[a-zA-Z_][a-zA-Z0-9_.]*$/);
     const partial = partialMatch ? partialMatch[0] : '';
+
+    // Check FOR clause
+    if (/FOR\s+[A-Z_]*$/i.test(before)) {
+        return { type: 'for_clause', partial };
+    }
+
+    // Check WITH clause
+    if (/WITH\s+[A-Z_]*$/i.test(before)) {
+        return { type: 'with_clause', partial };
+    }
+
+    // Check OFFSET value
+    if (/OFFSET\s+\d*$/i.test(before)) {
+        return { type: 'offset_value', partial };
+    }
+
+    // Check LIMIT value
+    if (/LIMIT\s+\d*$/i.test(before)) {
+        return { type: 'limit_value', partial };
+    }
+
+    // Check ORDER BY null ordering
+    if (/ORDER\s+BY\s+[^)]*\s+NULLS\s+[A-Z]*$/i.test(before)) {
+        return { type: 'nulls_order', partial };
+    }
+
+    // Check ORDER BY direction (only after field token + space)
+    const orderTail = beforeRaw.match(/ORDER\s+BY\s+([^)]*)$/i)?.[1] ?? '';
+    if (/\s+[A-Za-z]*$/.test(orderTail)) {
+        return { type: 'order_direction', partial };
+    }
 
     // Check ORDER BY
     if (/ORDER\s+BY\s+[^)]*$/i.test(before)) {
@@ -57,11 +91,23 @@ export function getQueryContext(text: string, offset: number): QueryContext {
     }
 
     // Check WHERE clause — are we after an operator (typing a value)?
-    const whereValueMatch = before.match(/(?:WHERE|AND|OR)\s+.*?(\w+)\s*(=|!=|<>|<=?|>=?|LIKE|IN|NOT\s+IN)\s*[^,)]*$/i);
+    const whereValueMatch = before.match(
+        /(?:WHERE|AND|OR)\s+.*?(\w+)\s*(=|!=|<>|<=?|>=?|LIKE|IN|NOT\s+IN|INCLUDES|EXCLUDES)\s*[^,)]*$/i
+    );
     if (whereValueMatch) {
-        const afterOperator = beforeRaw.match(/(=|!=|<>|<=?|>=?|LIKE|IN)\s*[^,)]*$/i);
+        const afterOperator = beforeRaw.match(/(=|!=|<>|<=?|>=?|LIKE|IN|NOT\s+IN|INCLUDES|EXCLUDES)\s*([^,)]*)$/i);
         if (afterOperator) {
-            return { type: 'where_value', field: whereValueMatch[1], partial };
+            const valuePart = afterOperator[2] ?? '';
+            const hasTrailingWhitespace = /\s$/.test(beforeRaw);
+            const hasStartedValue = valuePart.trim().length > 0;
+            const valueTrimmedEnd = valuePart.replace(/\s+$/, '');
+            const startedNextWord = /\s+[A-Za-z_]*$/.test(valueTrimmedEnd);
+            // If value is complete and cursor moved to next token, don't stay in value context.
+            if ((hasTrailingWhitespace && hasStartedValue) || startedNextWord) {
+                // Continue to clause/field transition checks below.
+            } else {
+                return { type: 'where_value', field: whereValueMatch[1], partial };
+            }
         }
     }
 
@@ -77,14 +123,24 @@ export function getQueryContext(text: string, offset: number): QueryContext {
         }
     }
 
-    // Check WHERE clause — typing a field name
-    if (/WHERE\s+[^)]*$/i.test(before) || /AND\s+[^)]*$/i.test(before) || /OR\s+[^)]*$/i.test(before)) {
+    // Check WHERE clause — just after WHERE/AND/OR keyword, starting a new condition
+    if (/(?:WHERE|AND|OR)\s*$/i.test(beforeRaw)) {
+        return { type: 'where_field', partial };
+    }
+
+    // Check WHERE clause — typing the field token of a new condition
+    if (/(?:WHERE|AND|OR)\s+[A-Za-z_][A-Za-z0-9_.]*$/i.test(beforeRaw)) {
         return { type: 'where_field', partial };
     }
 
     // Check FROM — typing object name
     if (/FROM\s+\w*$/i.test(before)) {
         return { type: 'from_object', partial };
+    }
+
+    // Clause transitions in tail position
+    if (/\b(FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY)\b[\s\S]*$/i.test(before) && /\s+[A-Z_]*$/.test(before)) {
+        return { type: 'tail_clause', partial };
     }
 
     // Check SELECT — typing field names

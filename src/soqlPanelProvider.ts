@@ -43,11 +43,13 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         this.logSubscription?.dispose();
         this.logSubscription = undefined;
 
-        // If an org is already selected, update the label immediately
+        // Always push org state to webview immediately so label never shows stale restored state.
         const currentOrg = this.sfCli.getCurrentOrg();
-        if (currentOrg) {
-            this.postMessage({ type: 'orgChanged', alias: currentOrg.alias, username: currentOrg.username });
-        }
+        this.postMessage({
+            type: 'orgChanged',
+            alias: currentOrg?.alias,
+            username: currentOrg?.username,
+        });
 
         // Pipe CLI log events to the webview console
         this.logSubscription = this.sfCli.onLog(({ level, message }: { level: string; message: string }) => {

@@ -1,3 +1,4 @@
+/** Guardrails for large-query execution and LIMIT/COUNT helpers. */
 export const AUTO_EXECUTE_COUNT_THRESHOLD = 5000;
 
 export function hasLimitClause(query: string): boolean {

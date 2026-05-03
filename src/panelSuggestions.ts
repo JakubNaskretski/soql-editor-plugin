@@ -1,3 +1,4 @@
+/** Computes context-aware autocomplete suggestions for the sidebar editor. */
 import { MetadataProvider } from './metadataProvider';
 import { SObjectDescribe } from './sfCliService';
 import { getQueryContext, extractFromObject } from './soqlParser';

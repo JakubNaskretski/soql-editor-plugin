@@ -1,8 +1,8 @@
 {
   "name": "soql-editor",
   "displayName": "SOQL Editor",
-  "description": "SOQL editor with autocomplete, validation, and multi-org query execution",
-  "version": "0.6.4",
+  "description": "SOQL editor for Salesforce with smart autocomplete, validation, and multi-org query execution",
+  "version": "0.6.5",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "keywords": [
@@ -102,6 +102,17 @@
           "group": "navigation"
         }
       ]
+    },
+    "configuration": {
+      "title": "SOQL Editor",
+      "properties": {
+        "soqlEditor.cacheExpiryDays": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Metadata cache expiry in days. Set to 0 to disable automatic expiry."
+        }
+      }
     }
   },
   "scripts": {
