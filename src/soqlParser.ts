@@ -173,7 +173,7 @@ export function extractFromObject(text: string): string | undefined {
 export function extractScopedFromInfo(text: string, offset: number): ScopedFromInfo | undefined {
     const safeOffset = Math.max(0, Math.min(offset, text.length));
     const tokens = scanSelectFromTokens(text);
-    const currentDepth = getDepthAtOffset(text, safeOffset);
+    const currentDepth = getQueryDepthAtOffset(text, safeOffset);
 
     const selectToken = findCurrentSelectToken(tokens, safeOffset, currentDepth);
     if (!selectToken) {
@@ -208,7 +208,7 @@ function readIdentifierAfter(text: string, index: number): string | undefined {
     return m ? m[1] : undefined;
 }
 
-function getDepthAtOffset(text: string, offset: number): number {
+export function getQueryDepthAtOffset(text: string, offset: number): number {
     let depth = 0;
     let inString = false;
     for (let i = 0; i < offset && i < text.length; i++) {
