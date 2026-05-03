@@ -160,10 +160,28 @@ export function getQueryContext(text: string, offset: number): QueryContext {
 
 /**
  * Extract the FROM object from a SOQL query string.
+ *
+ * Subquery-aware: walks the token stream and returns the first FROM at the
+ * outermost depth (matching the top-level SELECT). Falls back to the first
+ * regex-matched FROM only if no top-level FROM is found, which preserves
+ * the previous loose behavior for malformed/in-progress queries.
  */
 export function extractFromObject(text: string): string | undefined {
+    const top = extractTopLevelFromObject(text);
+    if (top) { return top; }
     const match = text.match(/\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)/i);
     return match ? match[1] : undefined;
+}
+
+/**
+ * Return the FROM object name at depth 0 (outside any parentheses/strings).
+ * Returns undefined when no top-level FROM token exists.
+ */
+export function extractTopLevelFromObject(text: string): string | undefined {
+    const tokens = scanSelectFromTokens(text);
+    const fromAtDepth0 = tokens.find(t => t.keyword === 'FROM' && t.depth === 0);
+    if (!fromAtDepth0) { return undefined; }
+    return readIdentifierAfter(text, fromAtDepth0.index + 'FROM'.length);
 }
 
 /**
@@ -244,6 +262,59 @@ function findCurrentSelectToken(
     return anyDepth.length > 0 ? anyDepth[anyDepth.length - 1] : undefined;
 }
 
+/**
+ * Find positions of a single keyword (or multi-word phrase like "ORDER BY")
+ * outside of string literals, with parenthesis depth tracking.
+ */
+export interface KeywordHit {
+    /** Index into the original text where the match starts. */
+    index: number;
+    /** Length of the matched text in the original string (handles arbitrary whitespace runs). */
+    length: number;
+    /** Parenthesis depth at the start of the match (0 = top level). */
+    depth: number;
+}
+
+export function findKeywordHits(text: string, phrase: string): KeywordHit[] {
+    const hits: KeywordHit[] = [];
+    const upper = text.toUpperCase();
+    const target = phrase.toUpperCase().trim();
+    const parts = target.split(/\s+/);
+    let depth = 0;
+    let inString = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+            inString = !inString;
+            continue;
+        }
+        if (inString) { continue; }
+        if (ch === '(') { depth++; continue; }
+        if (ch === ')') { depth = Math.max(0, depth - 1); continue; }
+
+        if (!isWordTokenAt(upper, i, parts[0])) { continue; }
+
+        // Multi-word phrase: walk forward past whitespace between parts.
+        let cursor = i + parts[0].length;
+        let matched = true;
+        for (let p = 1; p < parts.length; p++) {
+            while (cursor < text.length && /\s/.test(text[cursor])) { cursor++; }
+            if (!isWordTokenAt(upper, cursor, parts[p])) {
+                matched = false;
+                break;
+            }
+            cursor += parts[p].length;
+        }
+        if (!matched) { continue; }
+
+        hits.push({ index: i, length: cursor - i, depth });
+        i = cursor - 1;
+    }
+
+    return hits;
+}
+
 function scanSelectFromTokens(text: string): Array<{ keyword: 'SELECT' | 'FROM'; index: number; depth: number }> {
     const tokens: Array<{ keyword: 'SELECT' | 'FROM'; index: number; depth: number }> = [];
     let depth = 0;
@@ -283,7 +354,7 @@ function scanSelectFromTokens(text: string): Array<{ keyword: 'SELECT' | 'FROM';
     return tokens;
 }
 
-function isWordTokenAt(textUpper: string, index: number, token: 'SELECT' | 'FROM'): boolean {
+function isWordTokenAt(textUpper: string, index: number, token: string): boolean {
     if (!textUpper.startsWith(token, index)) {
         return false;
     }

@@ -20,6 +20,16 @@ export class QueryExecutor {
         this.outputChannel = outputChannel;
     }
 
+    private getSlowQueryWarningThreshold(): number {
+        const configured = vscode.workspace
+            .getConfiguration('soqlEditor')
+            .get<number>('slowQueryWarningThreshold', 5000);
+        if (!Number.isFinite(configured)) {
+            return 5000;
+        }
+        return Math.max(0, Math.floor(configured));
+    }
+
     async executeCurrentQuery() {
         const editor = vscode.window.activeTextEditor;
         if (!editor || editor.document.languageId !== 'soql') {
@@ -50,7 +60,7 @@ export class QueryExecutor {
                 try {
                     const countResult = await this.sfCli.executeQuery(countQuery);
                     const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
-                    if (shouldPromptForCount(totalRows)) {
+                    if (shouldPromptForCount(totalRows, this.getSlowQueryWarningThreshold())) {
                         const choice = await vscode.window.showWarningMessage(
                             `Query matches ${totalRows} records. Run it?`,
                             { modal: false },

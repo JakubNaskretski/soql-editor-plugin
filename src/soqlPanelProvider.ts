@@ -233,7 +233,13 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                             'Add LIMIT 2000',
                             `Fetch all ${totalRows}`
                         );
-                        if (!choice) { return; }
+                        if (!choice) {
+                            // User dismissed the warning — clear the spinner that
+                            // queryStarted left in place; otherwise the panel stays
+                            // in "Running..." forever.
+                            this.postMessage({ type: 'info', message: 'Query cancelled' });
+                            return;
+                        }
                         if (choice === 'Add LIMIT 200') {
                             query = applyLimit(query, 200);
                         } else if (choice === 'Add LIMIT 2000') {

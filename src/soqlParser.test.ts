@@ -10,6 +10,16 @@ describe('extractFromObject', () => {
     it('returns undefined when FROM is absent', () => {
         expect(extractFromObject('SELECT Id, Name')).toBeUndefined();
     });
+
+    it('returns the outer object when the SELECT contains a subquery', () => {
+        const query = 'SELECT Id, (SELECT Id FROM Contacts) FROM Account';
+        expect(extractFromObject(query)).toBe('Account');
+    });
+
+    it('ignores FROM-like text inside string literals', () => {
+        const query = "SELECT Id FROM Account WHERE Name = 'FROM Contacts'";
+        expect(extractFromObject(query)).toBe('Account');
+    });
 });
 
 describe('extractScopedFromInfo', () => {
