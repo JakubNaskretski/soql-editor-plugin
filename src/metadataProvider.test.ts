@@ -7,14 +7,17 @@ import { SObjectDescribe } from './sfCliService';
 
 const vscodeMockState = {
     cacheExpiryDays: 0,
+    syncConcurrency: 4,
+    describeTimeoutMs: 20000,
+    describeRetryCount: 1,
 };
 
 vi.mock('vscode', () => {
     return {
         workspace: {
             getConfiguration: () => ({
-                get: (_key: string, defaultValue: number) =>
-                    vscodeMockState.cacheExpiryDays ?? defaultValue,
+                get: (key: string, defaultValue: number) =>
+                    (vscodeMockState as Record<string, number | undefined>)[key] ?? defaultValue,
             }),
             workspaceFolders: [],
         },
@@ -26,7 +29,13 @@ interface FakeSfCli {
     getCachedDescribe: (name: string) => SObjectDescribe | undefined;
     setCachedDescribe: (name: string, describe: SObjectDescribe) => void;
     describeSObject: (name: string) => Promise<SObjectDescribe | undefined>;
+    describeSObjectDetailed: (name: string, options?: { timeoutMs?: number }) => Promise<{
+        describe?: SObjectDescribe;
+        reason?: 'timeout' | 'error';
+        errorMessage?: string;
+    }>;
     getObjectList: () => Promise<string[]>;
+    clearCache: () => void;
 }
 
 function makeDescribe(name: string, fields: string[]): SObjectDescribe {
@@ -68,7 +77,9 @@ function createProvider(opts?: {
             inMemoryDescribe.set(name.toLowerCase(), describe);
         },
         describeSObject: vi.fn(async (name: string) => describes.get(name.toLowerCase())),
+        describeSObjectDetailed: vi.fn(async (name: string) => ({ describe: describes.get(name.toLowerCase()) })),
         getObjectList: vi.fn(async () => opts?.objectList || []),
+        clearCache: vi.fn(),
     };
 
     const provider = new MetadataProvider(sfCli as any, outputChannel as any, tmpRoot);
@@ -78,6 +89,9 @@ function createProvider(opts?: {
 
 afterEach(() => {
     vscodeMockState.cacheExpiryDays = 0;
+    vscodeMockState.syncConcurrency = 4;
+    vscodeMockState.describeTimeoutMs = 20000;
+    vscodeMockState.describeRetryCount = 1;
 });
 
 describe('MetadataProvider (org-first cache strategy)', () => {
@@ -168,6 +182,22 @@ describe('MetadataProvider (org-first cache strategy)', () => {
         fs.rmSync(tmpRoot, { recursive: true, force: true });
     });
 
+    it('syncCommonMetadata uses getObjectList fallback when sf sobject list is empty', async () => {
+        const { provider, cacheDir, tmpRoot } = createProvider({
+            objectList: [],
+            describes: { account: makeDescribe('Account', ['Id', 'Name']) },
+        });
+
+        const progress = { report: vi.fn() };
+        const token = { isCancellationRequested: false };
+        const r = await provider.syncCommonMetadata(progress as any, token as any);
+
+        expect(r.candidateCount).toBeGreaterThan(0);
+        expect(r.fetched).toBeGreaterThan(0);
+        expect(fs.existsSync(path.join(cacheDir, 'Account.json'))).toBe(true);
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
     it('syncAllMetadata upgrades local-fallback state to org and clears placeholders', async () => {
         const { provider, cacheDir, tmpRoot } = createProvider({
             objectList: ['Account'],
@@ -191,9 +221,25 @@ describe('MetadataProvider (org-first cache strategy)', () => {
         const token = { isCancellationRequested: false };
         const synced = await provider.syncAllMetadata(progress as any, token as any);
 
-        expect(synced).toBeGreaterThan(0);
+        expect(synced.fetched + synced.alreadyCached).toBeGreaterThan(0);
         expect(provider.getCurrentOrgCacheSourceState()).toBe('org');
         expect(fs.existsSync(path.join(cacheDir, '_placeholders.json'))).toBe(false);
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('syncCommonMetadata applies configured timeout and worker defaults', async () => {
+        vscodeMockState.syncConcurrency = Number.NaN;
+        vscodeMockState.describeTimeoutMs = 15000;
+        const { provider, sfCli, tmpRoot } = createProvider({
+            objectList: ['Account'],
+            describes: { account: makeDescribe('Account', ['Id']) },
+        });
+
+        const progress = { report: vi.fn() };
+        const token = { isCancellationRequested: false };
+        await provider.syncCommonMetadata(progress as any, token as any);
+
+        expect((sfCli.describeSObjectDetailed as any).mock.calls[0][1].timeoutMs).toBe(15000);
         fs.rmSync(tmpRoot, { recursive: true, force: true });
     });
 });

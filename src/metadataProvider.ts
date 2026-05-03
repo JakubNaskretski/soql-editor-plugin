@@ -12,6 +12,15 @@ interface PlaceholderCacheData {
     objects: Record<string, { fields: string[] }>;
 }
 
+interface SyncRunStats {
+    fetched: number;
+    alreadyCached: number;
+    failed: number;
+    timedOut: number;
+    candidateCount: number;
+    attempted: number;
+}
+
 /**
  * Resolves per-org metadata from disk/CLI cache sources with strict source states.
  * Local project scanning is used only for one-time local-fallback cache bootstrap.
@@ -38,6 +47,42 @@ export class MetadataProvider {
             return undefined;
         }
         return expiryDays * 24 * 60 * 60 * 1000;
+    }
+
+    private getSyncConcurrency(): number {
+        const configured = vscode.workspace
+            .getConfiguration('soqlEditor')
+            .get<number>('syncConcurrency', 4);
+        if (!Number.isFinite(configured)) {
+            return 4;
+        }
+        const normalized = Math.floor(configured);
+        if (normalized < 1 || normalized > 10) {
+            return 4;
+        }
+        return normalized;
+    }
+
+    private getDescribeTimeoutMs(): number {
+        const configured = vscode.workspace
+            .getConfiguration('soqlEditor')
+            .get<number>('describeTimeoutMs', 20000);
+        if (!Number.isFinite(configured)) {
+            return 20000;
+        }
+        const normalized = Math.floor(configured);
+        return Math.min(120000, Math.max(5000, normalized));
+    }
+
+    private getDescribeRetryCount(): number {
+        const configured = vscode.workspace
+            .getConfiguration('soqlEditor')
+            .get<number>('describeRetryCount', 1);
+        if (!Number.isFinite(configured)) {
+            return 1;
+        }
+        const normalized = Math.floor(configured);
+        return Math.min(3, Math.max(0, normalized));
     }
 
     /**
@@ -546,53 +591,49 @@ export class MetadataProvider {
     async syncAllMetadata(
         progress: vscode.Progress<{ message?: string; increment?: number }>,
         token: vscode.CancellationToken
-    ): Promise<number> {
+    ): Promise<SyncRunStats> {
         this.prepareForOrgSync();
         const objectNames = await this.sfCli.getObjectList();
+        if (objectNames.length === 0) {
+            this.outputChannel.appendLine(
+                'syncAllMetadata: sf sobject list returned no objects. Check `sf org display`, auth, and network, then retry.'
+            );
+            return {
+                fetched: 0,
+                alreadyCached: 0,
+                failed: 0,
+                timedOut: 0,
+                candidateCount: 0,
+                attempted: 0,
+            };
+        }
         const toSync = objectNames.filter(n => !this.isOnDisk(n));
         const skipped = objectNames.length - toSync.length;
-        const total = toSync.length;
-        let synced = 0;
-        const batchSize = 20;
+        const workers = this.getSyncConcurrency();
+        const timeoutMs = this.getDescribeTimeoutMs();
+        const retryCount = this.getDescribeRetryCount();
 
         this.outputChannel.appendLine(
-            `Syncing metadata: ${total} objects to fetch, ${skipped} already cached (batch size ${batchSize})`
+            `Syncing metadata: ${toSync.length} objects to fetch, ${skipped} already cached (workers ${workers}, timeout ${timeoutMs}ms, retries ${retryCount})`
         );
+        this.outputChannel.appendLine(`sync workers: ${workers}`);
 
         if (skipped > 0) {
             progress.report({ message: `Skipped ${skipped} already cached` });
         }
 
-        for (let i = 0; i < total; i += batchSize) {
-            if (token.isCancellationRequested) { break; }
+        const runStats = await this.syncObjectsWithWorkers(toSync, progress, token, {
+            alreadyCached: skipped,
+            candidateCount: objectNames.length,
+        });
 
-            const batch = toSync.slice(i, i + batchSize);
-            progress.report({
-                message: `${batch[0]} ... (${i + 1}-${Math.min(i + batchSize, total)}/${total}, ${skipped} skipped)`,
-                increment: (batchSize / (total || 1)) * 100,
-            });
-
-            const results = await Promise.allSettled(
-                batch.map(async (name) => {
-                    const describe = await this.sfCli.describeSObject(name);
-                    if (describe) {
-                        this.saveToDiskCache(name, describe);
-                        return true;
-                    }
-                    return false;
-                })
-            );
-
-            for (const r of results) {
-                if (r.status === 'fulfilled' && r.value) { synced++; }
-            }
-        }
-
-        this.outputChannel.appendLine(`Sync complete: ${synced} fetched, ${skipped} skipped (cached)`);
+        this.outputChannel.appendLine(
+            `Sync complete: fetched ${runStats.fetched}, cached ${runStats.alreadyCached}, timed out ${runStats.timedOut}, failed ${runStats.failed}`
+        );
         this.setCurrentOrgCacheSourceState('org');
         this.clearPlaceholders();
         this.objectListCache = undefined;
-        return synced + skipped;
+        return runStats;
     }
 
     /**
@@ -601,7 +642,7 @@ export class MetadataProvider {
     async syncCommonMetadata(
         progress: vscode.Progress<{ message?: string; increment?: number }>,
         token: vscode.CancellationToken
-    ): Promise<number> {
+    ): Promise<SyncRunStats> {
         this.prepareForOrgSync();
         const commonObjects = [
             'Account', 'Contact', 'Lead', 'Opportunity', 'Case',
@@ -620,49 +661,140 @@ export class MetadataProvider {
             'AccountContactRelation', 'ContactPointEmail', 'ContactPointPhone',
         ];
 
-        // Also include any custom objects from the org
-        const allObjects = await this.sfCli.getObjectList();
+        // Use full getObjectList() (disk → CLI → SOQL_FALLBACK_OBJECTS) so a failed
+        // `sf sobject list` does not collapse to zero candidates.
+        const allObjects = await this.getObjectList();
         const customObjects = allObjects.filter(n => n.endsWith('__c'));
-        const toSync = [...new Set([...commonObjects, ...customObjects])]
-            .filter(n => allObjects.includes(n) || customObjects.includes(n))
-            .filter(n => !this.isOnDisk(n));
+        const candidates = [...new Set([...commonObjects, ...customObjects])].filter(n =>
+            allObjects.includes(n)
+        );
+        const alreadyCached = candidates.filter(n => this.isOnDisk(n)).length;
+        const toSync = candidates.filter(n => !this.isOnDisk(n));
+        const workers = this.getSyncConcurrency();
+        const timeoutMs = this.getDescribeTimeoutMs();
+        const retryCount = this.getDescribeRetryCount();
 
-        const total = toSync.length;
-        let synced = 0;
-        const batchSize = 20;
+        this.outputChannel.appendLine(
+            `Syncing ${toSync.length} common + custom objects (${alreadyCached} already on disk, ${candidates.length} candidates; workers ${workers}, timeout ${timeoutMs}ms, retries ${retryCount})`
+        );
+        this.outputChannel.appendLine(`sync workers: ${workers}`);
 
-        this.outputChannel.appendLine(`Syncing ${total} common + custom objects...`);
+        const runStats = await this.syncObjectsWithWorkers(toSync, progress, token, {
+            alreadyCached,
+            candidateCount: candidates.length,
+        });
 
-        for (let i = 0; i < total; i += batchSize) {
-            if (token.isCancellationRequested) { break; }
-
-            const batch = toSync.slice(i, i + batchSize);
-            progress.report({
-                message: `${batch[0]} ... (${i + 1}-${Math.min(i + batchSize, total)}/${total})`,
-                increment: (batchSize / (total || 1)) * 100,
-            });
-
-            const results = await Promise.allSettled(
-                batch.map(async (name) => {
-                    const describe = await this.sfCli.describeSObject(name);
-                    if (describe) {
-                        this.saveToDiskCache(name, describe);
-                        return true;
-                    }
-                    return false;
-                })
-            );
-
-            for (const r of results) {
-                if (r.status === 'fulfilled' && r.value) { synced++; }
-            }
-        }
-
-        this.outputChannel.appendLine(`Common sync complete: ${synced}/${total} objects cached`);
+        this.outputChannel.appendLine(
+            `Common sync complete: fetched ${runStats.fetched}, cached ${runStats.alreadyCached}, timed out ${runStats.timedOut}, failed ${runStats.failed}`
+        );
         this.setCurrentOrgCacheSourceState('org');
         this.clearPlaceholders();
         this.objectListCache = undefined;
-        return synced;
+        return runStats;
+    }
+
+    private async syncObjectsWithWorkers(
+        objectNames: string[],
+        progress: vscode.Progress<{ message?: string; increment?: number }>,
+        token: vscode.CancellationToken,
+        base: { alreadyCached: number; candidateCount: number }
+    ): Promise<SyncRunStats> {
+        const total = objectNames.length;
+        const workerCount = Math.min(this.getSyncConcurrency(), Math.max(total, 1));
+        const timeoutMs = this.getDescribeTimeoutMs();
+        const retryCount = this.getDescribeRetryCount();
+
+        let index = 0;
+        let completed = 0;
+        let fetched = 0;
+        let failed = 0;
+        let timedOut = 0;
+        const failedNames: string[] = [];
+
+        const updateProgress = (name: string) => {
+            progress.report({
+                message: `${name} ... (${Math.min(completed + 1, total)}/${total}, ${base.alreadyCached} skipped)`,
+                increment: total > 0 ? (1 / total) * 100 : 100,
+            });
+        };
+
+        const worker = async () => {
+            while (!token.isCancellationRequested) {
+                const current = index++;
+                if (current >= total) {
+                    return;
+                }
+                const name = objectNames[current];
+                updateProgress(name);
+                const result = await this.describeWithRetry(name, timeoutMs, retryCount);
+                completed++;
+                if (result.ok) {
+                    this.saveToDiskCache(name, result.describe);
+                    fetched++;
+                    continue;
+                }
+                if (result.reason === 'timeout') {
+                    timedOut++;
+                } else {
+                    failed++;
+                }
+                failedNames.push(name);
+            }
+        };
+
+        await Promise.all(Array.from({ length: workerCount }, async () => worker()));
+        this.logFailedObjects(failedNames);
+
+        return {
+            fetched,
+            alreadyCached: base.alreadyCached,
+            failed,
+            timedOut,
+            candidateCount: base.candidateCount,
+            attempted: total,
+        };
+    }
+
+    private async describeWithRetry(
+        objectName: string,
+        timeoutMs: number,
+        retryCount: number
+    ): Promise<
+        | { ok: true; describe: SObjectDescribe }
+        | { ok: false; reason: 'timeout' | 'error'; message?: string }
+    > {
+        let lastReason: 'timeout' | 'error' = 'error';
+        let lastMessage = '';
+
+        for (let attempt = 0; attempt <= retryCount; attempt++) {
+            const detailed = await this.sfCli.describeSObjectDetailed(objectName, { timeoutMs });
+            if (detailed.describe) {
+                return { ok: true, describe: detailed.describe };
+            }
+            lastReason = detailed.reason || 'error';
+            lastMessage = detailed.errorMessage || '';
+
+            const transient = lastReason === 'timeout' || /ETIMEDOUT|ECONN|EAI_AGAIN|ENOTFOUND/i.test(lastMessage);
+            const shouldRetry = attempt < retryCount && transient;
+            if (!shouldRetry) {
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+        }
+
+        this.outputChannel.appendLine(
+            `Sync describe failed for ${objectName}: ${lastReason}${lastMessage ? ` (${lastMessage})` : ''}`
+        );
+        return { ok: false, reason: lastReason, message: lastMessage };
+    }
+
+    private logFailedObjects(names: string[]) {
+        if (names.length === 0) {
+            return;
+        }
+        const sample = names.slice(0, 10).join(', ');
+        const suffix = names.length > 10 ? ` ... (+${names.length - 10} more)` : '';
+        this.outputChannel.appendLine(`Sync failures (${names.length}): ${sample}${suffix}`);
     }
 
     /**
@@ -688,6 +820,8 @@ export class MetadataProvider {
             if (cacheDir && fs.existsSync(cacheDir)) {
                 try {
                     fs.rmSync(cacheDir, { recursive: true, force: true });
+                    this.objectListCache = undefined;
+                    this.sfCli.clearCache();
                     this.outputChannel.appendLine(`Removed local-fallback cache before org sync: ${cacheDir}`);
                 } catch (err: any) {
                     this.outputChannel.appendLine(`Failed to clear local-fallback cache before org sync: ${err.message}`);

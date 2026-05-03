@@ -75,7 +75,7 @@
       },
       {
         "command": "soqlEditor.refreshMetadata",
-        "title": "SOQL: Refresh Object Metadata"
+        "title": "SOQL: Clear Cache"
       },
       {
         "command": "soqlEditor.syncMetadata",
@@ -111,6 +111,27 @@
           "default": 0,
           "minimum": 0,
           "description": "Metadata cache expiry in days. Set to 0 to disable automatic expiry."
+        },
+        "soqlEditor.syncConcurrency": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Number of parallel workers used during metadata sync."
+        },
+        "soqlEditor.describeTimeoutMs": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 5000,
+          "maximum": 120000,
+          "description": "Timeout in milliseconds for each object describe call during sync."
+        },
+        "soqlEditor.describeRetryCount": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 3,
+          "description": "How many retries to attempt for transient describe failures."
         }
       }
     }

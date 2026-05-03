@@ -29,6 +29,16 @@ export interface SObjectDescribe {
     childRelationships: { childSObject: string; field: string; relationshipName: string }[];
 }
 
+export interface DescribeOptions {
+    timeoutMs?: number;
+}
+
+export interface DescribeResult {
+    describe?: SObjectDescribe;
+    reason?: 'timeout' | 'error';
+    errorMessage?: string;
+}
+
 /**
  * Wraps Salesforce CLI (`sf`) commands to interact with orgs.
  */
@@ -132,59 +142,50 @@ export class SfCliService {
     /**
      * Describe an SObject to get its fields.
      */
-    async describeSObject(objectName: string): Promise<SObjectDescribe | undefined> {
+    async describeSObject(objectName: string, options?: DescribeOptions): Promise<SObjectDescribe | undefined> {
+        const result = await this.describeSObjectDetailed(objectName, options);
+        return result.describe;
+    }
+
+    /**
+     * Describe an SObject and return detailed failure reason.
+     */
+    async describeSObjectDetailed(objectName: string, options?: DescribeOptions): Promise<DescribeResult> {
         const normalizedName = normalizeSObjectApiName(objectName);
         if (!normalizedName) {
             this.log('warn', `Rejected invalid SObject API name: "${objectName}"`);
-            return undefined;
+            return { reason: 'error', errorMessage: 'Invalid SObject API name' };
         }
 
         const key = normalizedName.toLowerCase();
         if (this.metadataCache.has(key)) {
-            return this.metadataCache.get(key);
+            return { describe: this.metadataCache.get(key) };
         }
 
         const targetOrgArgs = this.getTargetOrgArgs();
         try {
-            const result = this.runCliSync([
+            const result = await this.runCliAsync([
                 'sobject',
                 'describe',
                 '--sobject',
                 normalizedName,
                 '--json',
                 ...targetOrgArgs,
-            ]);
-            const parsed = JSON.parse(result);
-            const r = parsed.result;
-
-            const describe: SObjectDescribe = {
-                name: r.name,
-                label: r.label,
-                fields: (r.fields || []).map((f: any) => ({
-                    name: f.name,
-                    label: f.label,
-                    type: f.type,
-                    referenceTo: f.referenceTo || [],
-                    relationshipName: f.relationshipName || null,
-                    picklistValues: (f.picklistValues || []).filter((p: any) => p.active),
-                    nillable: f.nillable,
-                    updateable: f.updateable,
-                    createable: f.createable,
-                })),
-                childRelationships: (r.childRelationships || [])
-                    .filter((c: any) => c.relationshipName)
-                    .map((c: any) => ({
-                        childSObject: c.childSObject,
-                        field: c.field,
-                        relationshipName: c.relationshipName,
-                    })),
-            };
+            ], {
+                timeoutMs: options?.timeoutMs,
+                logLabel: `sf sobject describe --sobject ${normalizedName} --json`,
+            });
+            const describe = this.parseDescribeResult(result);
 
             this.metadataCache.set(key, describe);
-            return describe;
+            return { describe };
         } catch (err: any) {
+            const timedOut = this.isTimeoutError(err);
             this.log('error', `Failed to describe ${normalizedName}: ${err.message}`);
-            return undefined;
+            return {
+                reason: timedOut ? 'timeout' : 'error',
+                errorMessage: err?.message || 'Unknown error',
+            };
         }
     }
 
@@ -229,19 +230,61 @@ export class SfCliService {
         });
     }
 
-    private async runCliAsync(args: string[]): Promise<string> {
-        this.log('cmd', `sf ${args[0]} ...`);
+    private async runCliAsync(
+        args: string[],
+        options?: { timeoutMs?: number; logLabel?: string }
+    ): Promise<string> {
+        this.log('cmd', options?.logLabel || `sf ${args[0]} ...`);
         return new Promise((resolve, reject) => {
-            execFile('sf', args, { timeout: 60000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+            execFile(
+                'sf',
+                args,
+                { timeout: options?.timeoutMs ?? 60000, maxBuffer: 10 * 1024 * 1024 },
+                (error, stdout, stderr) => {
                 if (stderr && stderr.trim()) {
                     this.log('warn', `stderr: ${stderr.trim()}`);
                 }
                 if (error) {
-                    reject(new Error(error.message));
+                    const wrapped = new Error(error.message) as Error & { code?: string };
+                    wrapped.code = (error as any)?.code;
+                    reject(wrapped);
                     return;
                 }
                 resolve(stdout);
-            });
+                }
+            );
         });
+    }
+
+    private isTimeoutError(err: any): boolean {
+        const message = String(err?.message || '');
+        return err?.code === 'ETIMEDOUT' || /ETIMEDOUT|timed out/i.test(message);
+    }
+
+    private parseDescribeResult(rawJson: string): SObjectDescribe {
+        const parsed = JSON.parse(rawJson);
+        const r = parsed.result;
+        return {
+            name: r.name,
+            label: r.label,
+            fields: (r.fields || []).map((f: any) => ({
+                name: f.name,
+                label: f.label,
+                type: f.type,
+                referenceTo: f.referenceTo || [],
+                relationshipName: f.relationshipName || null,
+                picklistValues: (f.picklistValues || []).filter((p: any) => p.active),
+                nillable: f.nillable,
+                updateable: f.updateable,
+                createable: f.createable,
+            })),
+            childRelationships: (r.childRelationships || [])
+                .filter((c: any) => c.relationshipName)
+                .map((c: any) => ({
+                    childSObject: c.childSObject,
+                    field: c.field,
+                    relationshipName: c.relationshipName,
+                })),
+        };
     }
 }

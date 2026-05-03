@@ -81,21 +81,14 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('soqlEditor.refreshMetadata', async () => {
-            const choice = await vscode.window.showQuickPick(
-                [
-                    { label: 'Memory only', description: 'Clear in-memory cache, keep disk cache', value: 'memory' },
-                    { label: 'Memory + Disk', description: 'Clear everything, re-fetch from org', value: 'both' },
-                ],
-                { placeHolder: 'What to clear?' }
-            );
-            if (!choice) { return; }
-            sfCli.clearCache();
-            if (choice.value === 'both') {
-                metadata.clearDiskCache();
-                vscode.window.showInformationMessage('SOQL Editor: All caches cleared');
-            } else {
-                vscode.window.showInformationMessage('SOQL Editor: Memory cache cleared (disk cache kept)');
+            const selectedOrg = sfCli.getCurrentOrg();
+            if (!selectedOrg) {
+                vscode.window.showWarningMessage('Select an org first');
+                return;
             }
+            sfCli.clearCache();
+            metadata.clearDiskCache();
+            vscode.window.showInformationMessage(`SOQL Editor: Cache cleared for ${selectedOrg.alias}`);
         })
     );
 
@@ -112,10 +105,16 @@ export function activate(context: vscode.ExtensionContext) {
                     cancellable: true,
                 },
                 async (progress, token) => {
-                    const count = await metadata.syncAllMetadata(progress, token);
-                    vscode.window.showInformationMessage(
-                        `SOQL Editor: ${count} objects in cache`
-                    );
+                    const r = await metadata.syncAllMetadata(progress, token);
+                    if (r.candidateCount === 0) {
+                        vscode.window.showWarningMessage(
+                            'SOQL Editor: No objects to sync for this org. Check Output → SOQL Editor and that `sf sobject list` works.'
+                        );
+                    } else {
+                        vscode.window.showInformationMessage(
+                            `SOQL Editor: Fetched ${r.fetched}; cached ${r.alreadyCached}; timed out ${r.timedOut}; failed ${r.failed}`
+                        );
+                    }
                 }
             );
         })
@@ -134,10 +133,28 @@ export function activate(context: vscode.ExtensionContext) {
                     cancellable: true,
                 },
                 async (progress, token) => {
-                    const count = await metadata.syncCommonMetadata(progress, token);
-                    vscode.window.showInformationMessage(
-                        `SOQL Editor: Cached ${count} common + custom objects`
-                    );
+                    const r = await metadata.syncCommonMetadata(progress, token);
+                    if (r.candidateCount === 0) {
+                        vscode.window.showWarningMessage(
+                            'SOQL Editor: No objects to sync for this org. Check Output → SOQL Editor and that `sf sobject list` works.'
+                        );
+                    } else if (r.fetched === 0 && r.alreadyCached > 0) {
+                        vscode.window.showInformationMessage(
+                            `SOQL Editor: ${r.alreadyCached} common + custom objects already cached (nothing new to fetch)`
+                        );
+                    } else if (r.fetched === 0 && (r.failed > 0 || r.timedOut > 0)) {
+                        vscode.window.showWarningMessage(
+                            `SOQL Editor: 0 describes saved (${r.attempted} attempted, ${r.timedOut} timed out, ${r.failed} failed). See Output → SOQL Editor.`
+                        );
+                    } else if (r.fetched === 0) {
+                        vscode.window.showWarningMessage(
+                            `SOQL Editor: 0 describes saved (${r.candidateCount} tried). See Output → SOQL Editor for errors.`
+                        );
+                    } else {
+                        vscode.window.showInformationMessage(
+                            `SOQL Editor: Fetched ${r.fetched}; cached ${r.alreadyCached}; timed out ${r.timedOut}; failed ${r.failed}`
+                        );
+                    }
                 }
             );
         })

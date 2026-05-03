@@ -132,7 +132,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
             return;
         }
         const pick = await vscode.window.showQuickPick([
-            { label: '$(refresh) Clear Memory Cache', description: 'Keeps disk cache; next query re-reads from disk or org', value: 'refresh' },
+            { label: '$(trash) Clear Cache', description: 'Clears cached metadata for the selected org', value: 'clearOrg' },
             { label: '$(zap) Sync Common + Custom Objects', description: '~50 standard objects + all custom objects (~1-2 min)', value: 'syncCommon' },
             { label: '$(server) Sync All Objects', description: 'Every object in the org (can take 30+ min)', value: 'syncAll' },
             { label: '$(search) Cache Single Object', description: 'Type an object API name to fetch and cache its fields', value: 'single' },
@@ -140,10 +140,15 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         if (!pick) { return; }
         try {
             switch (pick.value) {
-                case 'refresh':
+                case 'clearOrg':
                     this.sfCli.clearCache();
-                    this.postMessage({ type: 'log', level: 'info', message: 'In-memory cache cleared. Disk cache kept. Next query will re-fetch from cache or org.' });
-                    this.postMessage({ type: 'info', message: 'Memory cache cleared (disk cache kept)' });
+                    this.metadata.clearDiskCache();
+                    this.postMessage({
+                        type: 'log',
+                        level: 'info',
+                        message: 'Cleared cache for selected org.'
+                    });
+                    this.postMessage({ type: 'info', message: 'Cache cleared for selected org' });
                     break;
                 case 'syncCommon':
                     await vscode.commands.executeCommand('soqlEditor.syncCommonMetadata');
