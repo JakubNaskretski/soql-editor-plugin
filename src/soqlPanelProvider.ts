@@ -231,6 +231,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
 
         try {
             const result = await this.sfCli.executeQuery(query);
+            await this.metadata.reconcileSuccessfulQuery(query);
             const records: any[] = result.records || [];
             const totalSize: number = result.totalSize || records.length;
 

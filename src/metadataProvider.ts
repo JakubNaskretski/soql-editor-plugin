@@ -1,21 +1,20 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { SfCliService, SObjectDescribe, SObjectField, normalizeSObjectApiName } from './sfCliService';
+import { SfCliService, SObjectDescribe, normalizeSObjectApiName } from './sfCliService';
 import { LocalProjectScanner } from './localProjectScanner';
 import { SOQL_FALLBACK_OBJECTS } from './soqlCatalog';
+import { extractFromObject, extractSelectFields } from './soqlParser';
+
+export type CacheSourceState = 'none' | 'local-fallback' | 'org';
+
+interface PlaceholderCacheData {
+    objects: Record<string, { fields: string[] }>;
+}
 
 /**
- * Resolves SObject metadata from multiple sources.
- *
- * Object list (`getObjectList`): short-lived in-memory cache, then merge of
- * (org names from disk `_objectList.json` or `sf sobject list`) with local
- * SFDX object folder names; if empty, falls back to `SOQL_FALLBACK_OBJECTS`.
- *
- * Per-object describe (`describeSObject`): (1) in-memory cache in SfCliService,
- * (2) disk cache JSON per org, (3) live `sf sobject describe`, (4) local project
- * only if describe fails. When (1)–(3) succeed, local field XML is merged on top
- * so workspace changes override the cached/org describe for matching field names.
+ * Resolves per-org metadata from disk/CLI cache sources with strict source states.
+ * Local project scanning is used only for one-time local-fallback cache bootstrap.
  */
 export class MetadataProvider {
     private sfCli: SfCliService;
@@ -42,14 +41,12 @@ export class MetadataProvider {
     }
 
     /**
-     * Get object list -- merges local project objects + org objects.
-     * Caches the org object list to disk for fast startup.
+     * Get object list from selected-org cache, then CLI, then fallback list.
      */
     async getObjectList(): Promise<string[]> {
         if (this.objectListCache && Date.now() < this.objectListCache.expiresAt) {
             return this.objectListCache.value;
         }
-        const localObjects = this.localScanner.getLocalObjectNames();
 
         // Try disk-cached object list first
         let orgObjects = this.loadObjectListFromDisk();
@@ -57,20 +54,17 @@ export class MetadataProvider {
             orgObjects = await this.sfCli.getObjectList();
             if (orgObjects.length > 0) {
                 this.saveObjectListToDisk(orgObjects);
+                this.setCurrentOrgCacheSourceState('org');
             }
         }
 
-        const merged = new Set<string>(orgObjects);
-        for (const name of localObjects) {
-            merged.add(name);
-        }
-        if (merged.size === 0) {
+        if (!orgObjects || orgObjects.length === 0) {
             for (const name of SOQL_FALLBACK_OBJECTS) {
-                merged.add(name);
+                orgObjects.push(name);
             }
         }
 
-        const list = Array.from(merged).sort();
+        const list = Array.from(new Set(orgObjects)).sort();
         this.objectListCache = {
             value: list,
             expiresAt: Date.now() + 30_000,
@@ -106,10 +100,7 @@ export class MetadataProvider {
         } catch { /* ignore */ }
     }
 
-    /**
-     * Describe an SObject — tries cache/local first, then CLI.
-     * Merges local project fields on top of the full describe.
-     */
+    /** Describe an SObject via in-memory cache, disk cache, then live org. */
     async describeSObject(objectName: string): Promise<SObjectDescribe | undefined> {
         const normalizedName = normalizeSObjectApiName(objectName);
         if (!normalizedName) {
@@ -120,49 +111,26 @@ export class MetadataProvider {
         // 1. Check in-memory cache (inside SfCliService)
         const cached = this.sfCli.getCachedDescribe(normalizedName);
         if (cached) {
-            return this.mergeWithLocal(cached);
+            return cached;
         }
 
         // 2. Check disk cache
         const diskCached = this.loadFromDiskCache(normalizedName);
         if (diskCached) {
             this.sfCli.setCachedDescribe(normalizedName, diskCached);
-            return this.mergeWithLocal(diskCached);
+            return diskCached;
         }
 
         // 3. Try live CLI describe
         const live = await this.sfCli.describeSObject(normalizedName);
         if (live) {
             this.saveToDiskCache(normalizedName, live);
-            return this.mergeWithLocal(live);
+            this.setCurrentOrgCacheSourceState('org');
+            this.removePlaceholderObject(normalizedName);
+            return live;
         }
 
-        // 4. Fall back to local project only (e.g., offline or object not yet deployed)
-        const local = this.localScanner.describeFromLocal(normalizedName);
-        return local;
-    }
-
-    /**
-     * Merge local project field definitions on top of a full describe.
-     * Local fields override existing fields (they reflect your latest code).
-     */
-    private mergeWithLocal(describe: SObjectDescribe): SObjectDescribe {
-        const local = this.localScanner.describeFromLocal(describe.name);
-        if (!local) { return describe; }
-
-        const fieldMap = new Map<string, SObjectField>();
-        for (const f of describe.fields) {
-            fieldMap.set(f.name.toLowerCase(), f);
-        }
-        // Local fields override — these are from your source code
-        for (const f of local.fields) {
-            fieldMap.set(f.name.toLowerCase(), f);
-        }
-
-        return {
-            ...describe,
-            fields: Array.from(fieldMap.values()),
-        };
+        return undefined;
     }
 
     // ── disk cache ─────────────────────────────────────────────────────
@@ -185,10 +153,10 @@ export class MetadataProvider {
      * Returns a quick cache status summary for the currently selected org.
      * "hasCache" means at least one object describe file or an object-list snapshot exists.
      */
-    getCurrentOrgCacheStatus(): { hasCache: boolean; hasObjectList: boolean; objectFileCount: number } {
+    getCurrentOrgCacheStatus(): { hasCache: boolean; hasObjectList: boolean; objectFileCount: number; source: CacheSourceState } {
         const cacheDir = this.getCacheDir();
         if (!cacheDir || !fs.existsSync(cacheDir)) {
-            return { hasCache: false, hasObjectList: false, objectFileCount: 0 };
+            return { hasCache: false, hasObjectList: false, objectFileCount: 0, source: 'none' };
         }
 
         let hasObjectList = false;
@@ -201,19 +169,70 @@ export class MetadataProvider {
                     hasObjectList = true;
                     continue;
                 }
+                if (entry.name === '_cacheSource.json' || entry.name === '_placeholders.json') {
+                    continue;
+                }
                 if (entry.name.endsWith('.json')) {
                     objectFileCount++;
                 }
             }
         } catch {
-            return { hasCache: false, hasObjectList: false, objectFileCount: 0 };
+            return { hasCache: false, hasObjectList: false, objectFileCount: 0, source: 'none' };
         }
 
         return {
             hasCache: hasObjectList || objectFileCount > 0,
             hasObjectList,
             objectFileCount,
+            source: this.getCurrentOrgCacheSourceState(),
         };
+    }
+
+    getCurrentOrgCacheSourceState(): CacheSourceState {
+        const cacheDir = this.getCacheDir();
+        if (!cacheDir) { return 'none'; }
+        const filePath = path.join(cacheDir, '_cacheSource.json');
+        if (!fs.existsSync(filePath)) {
+            // Backward compatibility: existing caches created before source-state
+            // tracking are treated as org cache.
+            return this.hasOrgStyleCacheFiles(cacheDir) ? 'org' : 'none';
+        }
+        try {
+            const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+            if (content.source === 'org' || content.source === 'local-fallback') {
+                return content.source;
+            }
+            return this.hasOrgStyleCacheFiles(cacheDir) ? 'org' : 'none';
+        } catch {
+            return this.hasOrgStyleCacheFiles(cacheDir) ? 'org' : 'none';
+        }
+    }
+
+    setCurrentOrgCacheSourceState(source: Exclude<CacheSourceState, 'none'>) {
+        const cacheDir = this.getCacheDir();
+        if (!cacheDir) { return; }
+        try {
+            fs.mkdirSync(cacheDir, { recursive: true });
+            fs.writeFileSync(
+                path.join(cacheDir, '_cacheSource.json'),
+                JSON.stringify({ source, updatedAt: Date.now() }, null, 2),
+                'utf-8'
+            );
+        } catch (err: any) {
+            this.outputChannel.appendLine(`Error writing cache source state: ${err.message}`);
+        }
+    }
+
+    private hasOrgStyleCacheFiles(cacheDir: string): boolean {
+        try {
+            const files = fs.readdirSync(cacheDir);
+            return files.some(name =>
+                name === '_objectList.json' ||
+                (name.endsWith('.json') && name !== '_cacheSource.json' && name !== '_placeholders.json')
+            );
+        } catch {
+            return false;
+        }
     }
 
     /**
@@ -237,7 +256,10 @@ export class MetadataProvider {
                 const dirPath = path.join(root, name);
                 try {
                     const files = fs.readdirSync(dirPath);
-                    return files.some(f => f === '_objectList.json' || f.endsWith('.json'));
+                    return files.some(f =>
+                        f === '_objectList.json' ||
+                        (f.endsWith('.json') && f !== '_cacheSource.json' && f !== '_placeholders.json')
+                    );
                 } catch {
                     return false;
                 }
@@ -287,7 +309,140 @@ export class MetadataProvider {
             }
         }
 
+        if (copied > 0) {
+            this.setCurrentOrgCacheSourceState('org');
+            this.clearPlaceholders();
+            this.objectListCache = undefined;
+        }
+
         return copied;
+    }
+
+    bootstrapCurrentOrgCacheFromLocalProject(): number {
+        const cacheDir = this.getCacheDir();
+        if (!cacheDir) { return 0; }
+
+        const localObjectNames = this.localScanner.getLocalObjectNames();
+        if (localObjectNames.length === 0) { return 0; }
+
+        fs.mkdirSync(cacheDir, { recursive: true });
+        let saved = 0;
+        const objectList = new Set<string>(this.loadObjectListFromDisk() || []);
+        for (const objectName of localObjectNames) {
+            const describe = this.localScanner.describeFromLocal(objectName);
+            if (!describe) { continue; }
+            this.saveToDiskCache(objectName, describe);
+            objectList.add(describe.name);
+            saved++;
+        }
+        this.saveObjectListToDisk(Array.from(objectList));
+        this.setCurrentOrgCacheSourceState('local-fallback');
+        this.objectListCache = undefined;
+        return saved;
+    }
+
+    async reconcileSuccessfulQuery(query: string): Promise<void> {
+        const objectName = extractFromObject(query);
+        if (!objectName) { return; }
+        const normalized = normalizeSObjectApiName(objectName);
+        if (!normalized) { return; }
+
+        const current = await this.describeSObject(normalized);
+        this.addObjectToDiskObjectList(normalized);
+        const selectedFields = this.extractSimpleProjectedFieldRoots(query);
+
+        if (!current) {
+            this.markPlaceholderObject(normalized, selectedFields);
+            return;
+        }
+
+        const cachedFields = new Set(current.fields.map(f => f.name.toLowerCase()));
+        const missingFields = selectedFields.filter(
+            fieldName => !cachedFields.has(fieldName.toLowerCase())
+        );
+        if (missingFields.length > 0) {
+            // Describe succeeded but cached fields don't include all query fields;
+            // keep minimal marker so we can surface incomplete cache state.
+            this.markPlaceholderObject(normalized, missingFields);
+        } else {
+            this.removePlaceholderObject(normalized);
+        }
+    }
+
+    private extractSimpleProjectedFieldRoots(query: string): string[] {
+        const selectedFields = extractSelectFields(query)
+            .map(v => v.trim())
+            .filter(v => v.length > 0 && !v.startsWith('('));
+        return selectedFields
+            .map(fieldExpr => fieldExpr.split('.')[0].trim())
+            .filter(fieldName => /^[A-Za-z_][A-Za-z0-9_]*$/.test(fieldName))
+            .filter(fieldName => !/^(COUNT|AVG|SUM|MIN|MAX|COUNT_DISTINCT|FIELDS)$/i.test(fieldName));
+    }
+
+    private getPlaceholderFilePath(): string | undefined {
+        const cacheDir = this.getCacheDir();
+        if (!cacheDir) { return undefined; }
+        return path.join(cacheDir, '_placeholders.json');
+    }
+
+    private readPlaceholders(): PlaceholderCacheData {
+        const filePath = this.getPlaceholderFilePath();
+        if (!filePath || !fs.existsSync(filePath)) {
+            return { objects: {} };
+        }
+        try {
+            const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+            if (!parsed || typeof parsed !== 'object' || typeof parsed.objects !== 'object') {
+                return { objects: {} };
+            }
+            return parsed as PlaceholderCacheData;
+        } catch {
+            return { objects: {} };
+        }
+    }
+
+    private writePlaceholders(data: PlaceholderCacheData) {
+        const filePath = this.getPlaceholderFilePath();
+        if (!filePath) { return; }
+        try {
+            fs.mkdirSync(path.dirname(filePath), { recursive: true });
+            fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+        } catch (err: any) {
+            this.outputChannel.appendLine(`Error writing placeholder cache: ${err.message}`);
+        }
+    }
+
+    private markPlaceholderObject(objectName: string, fields: string[]) {
+        const normalized = normalizeSObjectApiName(objectName);
+        if (!normalized) { return; }
+        const data = this.readPlaceholders();
+        const key = normalized.toLowerCase();
+        const current = data.objects[key]?.fields || [];
+        const merged = Array.from(new Set([
+            ...current,
+            ...fields.filter(f => /^[A-Za-z_][A-Za-z0-9_]*$/.test(f)).map(f => f.trim())
+        ]));
+        data.objects[key] = { fields: merged };
+        this.writePlaceholders(data);
+    }
+
+    private removePlaceholderObject(objectName: string) {
+        const key = objectName.toLowerCase();
+        const data = this.readPlaceholders();
+        if (data.objects[key]) {
+            delete data.objects[key];
+            this.writePlaceholders(data);
+        }
+    }
+
+    private clearPlaceholders() {
+        const filePath = this.getPlaceholderFilePath();
+        if (!filePath || !fs.existsSync(filePath)) { return; }
+        try {
+            fs.unlinkSync(filePath);
+        } catch {
+            // Ignore placeholder cleanup failure
+        }
     }
 
     private loadFromDiskCache(objectName: string): SObjectDescribe | undefined {
@@ -337,6 +492,7 @@ export class MetadataProvider {
                 JSON.stringify(data, null, 2),
                 'utf-8'
             );
+            this.addObjectToDiskObjectList(describe.name || objectName);
         } catch (err: any) {
             this.outputChannel.appendLine(`Error writing cache for ${objectName}: ${err.message}`);
         }
@@ -350,6 +506,17 @@ export class MetadataProvider {
         if (fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
         }
+    }
+
+    private addObjectToDiskObjectList(objectName: string) {
+        const normalizedName = normalizeSObjectApiName(objectName);
+        if (!normalizedName) { return; }
+        const existing = this.loadObjectListFromDisk() || [];
+        if (existing.some(name => name.toLowerCase() === normalizedName.toLowerCase())) {
+            return;
+        }
+        this.saveObjectListToDisk([...existing, normalizedName]);
+        this.objectListCache = undefined;
     }
 
     /**
@@ -380,6 +547,7 @@ export class MetadataProvider {
         progress: vscode.Progress<{ message?: string; increment?: number }>,
         token: vscode.CancellationToken
     ): Promise<number> {
+        this.prepareForOrgSync();
         const objectNames = await this.sfCli.getObjectList();
         const toSync = objectNames.filter(n => !this.isOnDisk(n));
         const skipped = objectNames.length - toSync.length;
@@ -421,6 +589,9 @@ export class MetadataProvider {
         }
 
         this.outputChannel.appendLine(`Sync complete: ${synced} fetched, ${skipped} skipped (cached)`);
+        this.setCurrentOrgCacheSourceState('org');
+        this.clearPlaceholders();
+        this.objectListCache = undefined;
         return synced + skipped;
     }
 
@@ -431,6 +602,7 @@ export class MetadataProvider {
         progress: vscode.Progress<{ message?: string; increment?: number }>,
         token: vscode.CancellationToken
     ): Promise<number> {
+        this.prepareForOrgSync();
         const commonObjects = [
             'Account', 'Contact', 'Lead', 'Opportunity', 'Case',
             'Task', 'Event', 'User', 'Profile', 'UserRole',
@@ -487,6 +659,9 @@ export class MetadataProvider {
         }
 
         this.outputChannel.appendLine(`Common sync complete: ${synced}/${total} objects cached`);
+        this.setCurrentOrgCacheSourceState('org');
+        this.clearPlaceholders();
+        this.objectListCache = undefined;
         return synced;
     }
 
@@ -504,6 +679,21 @@ export class MetadataProvider {
             this.outputChannel.appendLine(`Error clearing cache: ${err.message}`);
         }
         this.objectListCache = undefined;
+    }
+
+    private prepareForOrgSync() {
+        const sourceState = this.getCurrentOrgCacheSourceState();
+        if (sourceState === 'local-fallback') {
+            const cacheDir = this.getCacheDir();
+            if (cacheDir && fs.existsSync(cacheDir)) {
+                try {
+                    fs.rmSync(cacheDir, { recursive: true, force: true });
+                    this.outputChannel.appendLine(`Removed local-fallback cache before org sync: ${cacheDir}`);
+                } catch (err: any) {
+                    this.outputChannel.appendLine(`Failed to clear local-fallback cache before org sync: ${err.message}`);
+                }
+            }
+        }
     }
 
     private getSafeObjectCachePath(cacheDir: string, objectName: string): string | undefined {

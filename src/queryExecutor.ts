@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { SfCliService } from './sfCliService';
+import { MetadataProvider } from './metadataProvider';
 import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
 import { flattenRecordForDisplay } from './resultFlattening';
 
@@ -9,11 +10,13 @@ import { flattenRecordForDisplay } from './resultFlattening';
 export class QueryExecutor {
     private static readonly MAX_RENDER_ROWS = 10000;
     private sfCli: SfCliService;
+    private metadata: MetadataProvider;
     private outputChannel: vscode.OutputChannel;
     private panel: vscode.WebviewPanel | undefined;
 
-    constructor(sfCli: SfCliService, outputChannel: vscode.OutputChannel) {
+    constructor(sfCli: SfCliService, metadata: MetadataProvider, outputChannel: vscode.OutputChannel) {
         this.sfCli = sfCli;
+        this.metadata = metadata;
         this.outputChannel = outputChannel;
     }
 
@@ -77,6 +80,7 @@ export class QueryExecutor {
             async () => {
                 try {
                     const result = await this.sfCli.executeQuery(query);
+                    await this.metadata.reconcileSuccessfulQuery(query);
                     this.showResults(query, result);
                 } catch (err: any) {
                     this.outputChannel.appendLine(`Query error: ${err.message}`);

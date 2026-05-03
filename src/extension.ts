@@ -55,7 +55,7 @@ export function activate(context: vscode.ExtensionContext) {
     const diagnosticsProvider = new SoqlDiagnosticsProvider(sfCli, metadata);
 
     // Query execution
-    const queryExecutor = new QueryExecutor(sfCli, outputChannel);
+    const queryExecutor = new QueryExecutor(sfCli, metadata, outputChannel);
 
     // Register completion provider — trigger on `.` (for relationship traversals) and `,`
     context.subscriptions.push(
@@ -188,12 +188,31 @@ export function activate(context: vscode.ExtensionContext) {
     migrateLegacyCache(context.globalStorageUri.fsPath, context.globalState, outputChannel);
 }
 
-async function maybePromptForMetadataReadiness(
+export async function maybePromptForMetadataReadiness(
     metadata: MetadataProvider,
     promptType: 'startup' | 'switch'
 ) {
     const status = metadata.getCurrentOrgCacheStatus();
-    if (status.hasCache) { return; }
+    if (status.hasCache && status.source === 'org') { return; }
+
+    if (status.source === 'local-fallback') {
+        const localTitle = promptType === 'startup'
+            ? 'SOQL Editor: This org is using local-repo generated metadata cache. It may be incomplete for the target org.'
+            : 'SOQL Editor: Active cache source is local-repo metadata for this org and may be inaccurate.';
+        const localChoice = await vscode.window.showInformationMessage(
+            localTitle,
+            'Download Common Metadata',
+            'Download All Metadata',
+            'Keep Local Cache'
+        );
+        if (!localChoice || localChoice === 'Keep Local Cache') { return; }
+        if (localChoice === 'Download Common Metadata') {
+            await vscode.commands.executeCommand('soqlEditor.syncCommonMetadata');
+        } else if (localChoice === 'Download All Metadata') {
+            await vscode.commands.executeCommand('soqlEditor.syncMetadata');
+        }
+        return;
+    }
 
     const otherCaches = metadata.listOtherCachedOrgKeys();
     const hasOtherCaches = otherCaches.length > 0;
@@ -203,8 +222,8 @@ async function maybePromptForMetadataReadiness(
         : 'SOQL Editor: This org has no metadata cache yet. Autocomplete may be limited.';
 
     const actions = hasOtherCaches
-        ? ['Download Common Metadata', 'Download All Metadata', 'Reuse Other Org Cache', 'Later']
-        : ['Download Common Metadata', 'Download All Metadata', 'Later'];
+        ? ['Download Common Metadata', 'Download All Metadata', 'Use Local Repo Metadata', 'Reuse Other Org Cache', 'Later']
+        : ['Download Common Metadata', 'Download All Metadata', 'Use Local Repo Metadata', 'Later'];
 
     const choice = await vscode.window.showInformationMessage(title, ...actions);
     if (!choice || choice === 'Later') { return; }
@@ -216,6 +235,20 @@ async function maybePromptForMetadataReadiness(
 
     if (choice === 'Download All Metadata') {
         await vscode.commands.executeCommand('soqlEditor.syncMetadata');
+        return;
+    }
+
+    if (choice === 'Use Local Repo Metadata') {
+        const built = metadata.bootstrapCurrentOrgCacheFromLocalProject();
+        if (built > 0) {
+            vscode.window.showInformationMessage(
+                `SOQL Editor: Generated local fallback cache for ${built} objects.`
+            );
+        } else {
+            vscode.window.showWarningMessage(
+                'SOQL Editor: No local SFDX object metadata found to build a fallback cache.'
+            );
+        }
         return;
     }
 
