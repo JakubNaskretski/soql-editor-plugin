@@ -8,26 +8,55 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write
-  id-token: write
 
 jobs:
   review:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: --model claude-sonnet-4-6
-          use_sticky_comment: true
-          show_full_output: true
-          prompt: |
-            Review this PR diff for:
-            1. Bugs and logic errors — including off-by-one errors, wrong index/slice boundaries, incorrect comparisons
-            2. Security vulnerabilities (injection, XSS, exposed secrets, unsafe input handling)
-            3. Code quality issues (readability, naming, duplication)
+          fetch-depth: 0
 
-            Be concise. Only flag real issues with severity (HIGH/MEDIUM/LOW) and file:line reference.
-            If everything looks good, say so in one line.
+      - name: Get PR diff
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+          echo "diff_size=$(wc -c < pr.diff)" >> $GITHUB_OUTPUT
+
+      - name: Claude PR Review
+        id: claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          DIFF=$(cat pr.diff)
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$(jq -n \
+              --arg diff "$DIFF" \
+              '{
+                model: "claude-sonnet-4-6",
+                max_tokens: 1024,
+                messages: [{
+                  role: "user",
+                  content: ("Review this PR diff for:\n1. Bugs and logic errors (including off-by-one, wrong index/slice boundaries)\n2. Security vulnerabilities (injection, XSS, hardcoded secrets)\n3. Code quality issues\n\nBe concise. Only flag real issues with severity (HIGH/MEDIUM/LOW) and file:line reference. If everything looks good, say so in one line.\n\nDiff:\n" + $diff)
+                }]
+              }'
+            )")
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          echo "review<<EOF" >> $GITHUB_OUTPUT
+          echo "$REVIEW" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const review = `## Claude Code PR Review\n\n${{ steps.claude.outputs.review }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: review
+            });
