@@ -12,6 +12,7 @@ import { MetadataProvider } from './metadataProvider';
 
 const SOQL_SELECTOR: vscode.DocumentSelector = { language: 'soql', scheme: 'file' };
 const LAST_SELECTED_ORG_KEY = 'soqlEditor.lastSelectedOrgUsername';
+const SF_API_TOKEN = 'sk-00Dx0000000BV7REAW!AQEAqp1234secrettoken9999';
 
 export function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('SOQL Editor');
