@@ -62,9 +62,11 @@ jobs:
             -d @payload.json) || { echo "review=Claude API call failed." >> $GITHUB_OUTPUT; exit 0; }
 
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          echo "review<<EOF" >> $GITHUB_OUTPUT
+          [ "$REVIEW" = "null" ] && REVIEW="Claude API returned unexpected response."
+          DELIM=$(uuidgen)
+          echo "review<<$DELIM" >> $GITHUB_OUTPUT
           echo "$REVIEW" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "$DELIM" >> $GITHUB_OUTPUT
 
       - name: Post PR comment and check severity
         uses: actions/github-script@v7
