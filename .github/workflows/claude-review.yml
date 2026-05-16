@@ -19,7 +19,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-sonnet-4-6
+          claude_args: --model claude-sonnet-4-6
           prompt: |
             Review this PR diff for:
             1. Bugs and logic errors — including off-by-one errors, wrong index/slice boundaries, incorrect comparisons
