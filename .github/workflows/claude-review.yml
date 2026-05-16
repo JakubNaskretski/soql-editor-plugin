@@ -19,4 +19,12 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: "Review this PR for bugs, security issues, and code quality. Post your findings as a PR comment."
+          model: claude-sonnet-4-6
+          prompt: |
+            Review this PR diff for:
+            1. Bugs and logic errors — including off-by-one errors, wrong index/slice boundaries, incorrect comparisons
+            2. Security vulnerabilities (injection, XSS, exposed secrets, unsafe input handling)
+            3. Code quality issues (readability, naming, duplication)
+
+            Be concise. Only flag real issues with severity (HIGH/MEDIUM/LOW) and file:line reference.
+            If everything looks good, say so in one line.
