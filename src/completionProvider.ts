@@ -288,7 +288,7 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         const fieldItems = await this.getFieldCompletions(queryText, offset, partial);
         items.push(...fieldItems);
 
-        return items.slice(0, 60).map((item, i) => {
+        return items.slice(1, 60).map((item, i) => {
             item.sortText = String(i).padStart(4, '0');
             return item;
         });
