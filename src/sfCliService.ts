@@ -235,15 +235,27 @@ export class SfCliService {
 
     /**
      * Redact sensitive values from CLI argv before logging.
-     * Drops the value following any known sensitive flag (currently `--query`).
-     * Centralized so future flag additions can't accidentally leak.
+     *
+     * Handles both forms accepted by oclif-style CLIs:
+     *   - separated:  `['--query', 'SELECT ...']`  → value redacted
+     *   - inline:     `['--query=SELECT ...']`     → value after `=` redacted
+     *
+     * Centralized so future flag additions only need a single allowlist update.
      */
     private redactArgsForLog(args: string[]): string {
         const SENSITIVE = new Set(['--query', '--password', '--token']);
         const safe: string[] = [];
         for (let i = 0; i < args.length; i++) {
-            safe.push(args[i]);
-            if (SENSITIVE.has(args[i]) && i + 1 < args.length) {
+            const arg = args[i];
+            // Inline form: --flag=value
+            const eqIdx = arg.indexOf('=');
+            if (arg.startsWith('--') && eqIdx > 0 && SENSITIVE.has(arg.slice(0, eqIdx))) {
+                safe.push(`${arg.slice(0, eqIdx)}=<redacted>`);
+                continue;
+            }
+            safe.push(arg);
+            // Separated form: --flag value
+            if (SENSITIVE.has(arg) && i + 1 < args.length) {
                 safe.push('<redacted>');
                 i++;
             }

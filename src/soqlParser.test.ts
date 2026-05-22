@@ -126,6 +126,25 @@ describe('validateSoqlStructure', () => {
         expect(errs.some(m => m.startsWith('Missing comma between SELECT fields'))).toBe(true);
     });
 
+    it('points the missing-comma diagnostic at the actual offending slot, not the first match', () => {
+        // The third slot ("Name Name") is the broken one; the first slot is a
+        // standalone "Name". A naive indexOf-based offset would point at the
+        // first occurrence instead of the third.
+        const q = 'SELECT Name, Other, Name Name FROM Account';
+        const errs = validateSoqlStructure(q);
+        const missingComma = errs.find(e => e.message.startsWith('Missing comma between SELECT fields'));
+        expect(missingComma).toBeDefined();
+        // The third slot ("Name Name") starts at column 20 (0-indexed).
+        expect(missingComma!.startCol).toBe(q.indexOf('Name Name'));
+    });
+
+    it('still flags missing FROM even when other errors are present', () => {
+        // Unmatched paren + missing FROM — both should be reported.
+        const errs = messages('SELECT (Id, Name');
+        expect(errs).toContain('Missing FROM clause');
+        expect(errs.some(m => m.startsWith('Unmatched'))).toBe(true);
+    });
+
     it('does not falsely flag function calls / subqueries as missing commas', () => {
         expect(messages('SELECT Id, FORMAT(CreatedDate) FROM Account')).toEqual([]);
         expect(messages('SELECT Id, (SELECT Id FROM Contacts) FROM Account')).toEqual([]);

@@ -21,8 +21,9 @@ export function normalizeSObjectApiName(name: string): string | undefined {
     const trimmed = name.trim();
     if (!trimmed) { return undefined; }
     if (!SOBJECT_API_NAME_RE.test(trimmed)) { return undefined; }
-    // Defense in depth: tighter regex above already excludes __r, but explicit
-    // reject keeps the intent obvious to readers.
+    // The regex above admits `Foo__r` because `Foo__` can match the optional
+    // namespace prefix and `r` matches the body. This explicit check is the
+    // load-bearing one for rejecting relationship-suffixed names.
     if (/__r$/.test(trimmed)) { return undefined; }
     return trimmed;
 }

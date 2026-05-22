@@ -418,6 +418,54 @@ function findTopLevelFromIndex(text: string, start: number): number {
 }
 
 /**
+ * Like {@link splitTopLevelCsv} but returns offset metadata for each slot so
+ * callers can report accurate error positions even when several slots share
+ * the same text (e.g. `SELECT Name, Name Name FROM ...`).
+ *
+ * `start` is the offset (into the input string) of the first non-whitespace
+ * character of the slot, or the comma position if the slot is empty.
+ */
+function splitTopLevelCsvWithOffsets(input: string): { value: string; start: number }[] {
+    const parts: { value: string; start: number }[] = [];
+    let current = '';
+    let depth = 0;
+    let inString = false;
+    let slotStart = 0;
+    let slotStartedAt = -1; // offset of first non-whitespace in current slot
+
+    const finalizeSlot = (atIndex: number) => {
+        const value = current.trim();
+        const start = slotStartedAt >= 0 ? slotStartedAt : atIndex;
+        parts.push({ value, start });
+        current = '';
+        slotStartedAt = -1;
+    };
+
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+        if (ch === "'" && (i === 0 || input[i - 1] !== '\\')) {
+            inString = !inString;
+            if (slotStartedAt < 0) { slotStartedAt = i; }
+            current += ch;
+            continue;
+        }
+        if (!inString) {
+            if (ch === '(') { depth++; if (slotStartedAt < 0) { slotStartedAt = i; } current += ch; continue; }
+            if (ch === ')' && depth > 0) { depth--; current += ch; continue; }
+            if (ch === ',' && depth === 0) {
+                finalizeSlot(i);
+                slotStart = i + 1;
+                continue;
+            }
+        }
+        if (slotStartedAt < 0 && !/\s/.test(ch)) { slotStartedAt = i; }
+        current += ch;
+    }
+    finalizeSlot(slotStart);
+    return parts;
+}
+
+/**
  * Replace each string literal in `text` with same-length spaces so that
  * downstream scans never accidentally match SOQL syntax inside string content.
  * Preserves character offsets — error positions stay accurate.
@@ -558,9 +606,11 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     const selectToFrom = text.match(/\bSELECT\s+([\s\S]*?)\bFROM\b/i);
 
     // Missing FROM clause — a query that starts with SELECT must have a top-level FROM.
-    // Only check when there's no other structural error already (parens/strings closed).
+    // `findKeywordHits` is depth/string-aware on its own, so this check is safe to
+    // run even when other errors are already present (unmatched parens, unclosed
+    // strings) — the user still benefits from seeing the FROM diagnostic.
     const selectKeywordMatch = /\bSELECT\b/i.exec(text);
-    if (selectKeywordMatch && errors.length === 0) {
+    if (selectKeywordMatch) {
         const hits = findKeywordHits(text, 'FROM').filter(h => h.depth === 0);
         if (hits.length === 0) {
             pushErrorAt(
@@ -611,19 +661,27 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     // identifiers separated by whitespace (and isn't a function call / subquery /
     // aggregate alias).
     if (selectToFrom && selectToFrom[1].trim().length > 0) {
-        const selectStart = text.toUpperCase().indexOf('SELECT') + 'SELECT'.length;
-        const fields = splitTopLevelCsv(selectToFrom[1]);
+        // The captured group starts inside the regex match, *after* `SELECT\s+`.
+        // Compute its absolute offset so per-slot positions land on the real text.
+        const matchStart = selectToFrom.index ?? text.toUpperCase().indexOf('SELECT');
+        const captureOffsetInMatch = selectToFrom[0].indexOf(selectToFrom[1]);
+        const clauseStart = matchStart + (captureOffsetInMatch >= 0 ? captureOffsetInMatch : 0);
         const fieldClauseRaw = selectToFrom[1];
-        for (const fieldRaw of fields) {
-            const field = fieldRaw.trim();
+        // Walk the clause once, tracking the running offset so the Nth field's
+        // position is found even when an earlier slot has the same text.
+        for (const slot of splitTopLevelCsvWithOffsets(fieldClauseRaw)) {
+            const field = slot.value.trim();
+            if (!field) { continue; }
             if (field.startsWith('(')) { continue; }                      // subquery
             if (/[(){}]/.test(field)) { continue; }                        // function/aggregate
-            // Two-or-more whitespace-separated identifiers without commas.
             const idTokens = field.match(/[A-Za-z_][A-Za-z0-9_.]*/g) || [];
             if (idTokens.length >= 2 && !/[(),]/.test(field)) {
-                const idxInClause = fieldClauseRaw.indexOf(field);
-                const absOffset = idxInClause >= 0 ? selectStart + idxInClause : selectStart;
-                pushErrorAt(`Missing comma between SELECT fields: '${field}'`, absOffset, field.length);
+                // slot.start points at the first non-whitespace char of the slot.
+                pushErrorAt(
+                    `Missing comma between SELECT fields: '${field}'`,
+                    clauseStart + slot.start,
+                    field.length
+                );
             }
         }
     }
