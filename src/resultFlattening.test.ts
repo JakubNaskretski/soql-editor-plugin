@@ -45,6 +45,18 @@ describe('flattenRecordForDisplay', () => {
         expect(flattened['Contacts[1].LastName']).toBe('Roe');
     });
 
+    it('emits only totalSize/done for empty child subqueries (no phantom [0])', () => {
+        const record = {
+            Name: 'Acme',
+            Contacts: { totalSize: 0, done: true, records: [] },
+        };
+        const flattened = flattenRecordForDisplay(record);
+        expect(flattened.Name).toBe('Acme');
+        expect(flattened['Contacts.totalSize']).toBe('0');
+        expect(flattened['Contacts.done']).toBe('true');
+        expect(flattened['Contacts[0]']).toBeUndefined();
+    });
+
     it('normalizes null/undefined and handles empty nested objects', () => {
         const record = {
             Parent: {},

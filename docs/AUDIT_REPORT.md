@@ -1,11 +1,21 @@
 # SOQL Editor Extension — Validation & Audit Report
 
-**Scope:** [`soql-editor/`](../) (VS Code extension v0.6.5)
+**Scope:** [`soql-editor/`](../) (VS Code extension v0.6.6)
 **Date:** 2026-05-03
 **Method:** Static review of `src/**`, ran the Vitest suite (41/41 passing), and exercised the compiled helpers in `out/` against ~50 contrived edge-case inputs.
 **Note:** Supersedes the earlier 2026-04-27 report (v0.6.0). Several previously flagged Critical/High items have been addressed (CLI now uses `execFile` with argv, SObject names normalized, path traversal blocked, diagnostics generation counter, org picker carries `OrgInfo` on the QuickPick item, log redacts query body). The findings below focus on what remains and on regressions/gaps observed in current behavior.
 
 **Status update (2026-05-03, branch `fix/audit-tier1-fixes`):** P1.1, P1.2, P1.3, P1.4, P1.5, P1.6 and P3.1 are now fixed in code with tests. Open items have been migrated to `TODO.md` under the "Audit follow-up" section.
+
+**Status update (2026-05-22, audit pass v2):** Two waves of fixes landed.
+
+*Wave 1 (correctness & security):* P2.1 / P2.2 / P2.3 / P2.4 / P2.6 / P2.7 (validator gaps), P3.2 / P3.3 / P3.5 / P3.7 / P3.11 (UX + workspace trust), P4.6 (README), S1 / S2 / S6 (workspace trust, recordId re-validation, symlink-safe copy). P4.7 reviewed and determined not to be a real race (`addObjectToDiskObjectList` is fully synchronous and runs inside sync `saveToDiskCache` — no `await` between read and write).
+
+*Wave 2 (polish):* P2.5 / P3.4 documented in code, P3.6 (dedup CLI log), P3.9 (trim persisted state), P3.10 (dedup panel listeners), P4.2 (coalesce relationship-chain suggestions), P4.3 (clear errors on server error), P4.4 (skip highlight on caret nav), P4.5 (banner copy), P4.8 (null/undefined-safe CSV cells), P4.9 (panel.js build-time syntax check), S3 (central CLI argv redaction), S5 (`soqlEditor.autoExcludeLegacyCache` config).
+
+Open: P3.8 (deep-subquery scope resolution) and P4.1 (default `cacheExpiryDays`) — left as-is, both involve policy/integration decisions worth a separate discussion.
+
+Tests: 71/71 passing, TypeScript clean. See `TODO.md` for the per-item status.
 
 ---
 

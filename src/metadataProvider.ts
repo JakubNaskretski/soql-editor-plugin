@@ -31,12 +31,25 @@ export class MetadataProvider {
     private outputChannel: vscode.OutputChannel;
     private globalStoragePath: string;
     private objectListCache: { value: string[]; expiresAt: number } | undefined;
+    private lastSurfacedObjectListError: string | undefined;
 
     constructor(sfCli: SfCliService, outputChannel: vscode.OutputChannel, globalStoragePath: string) {
         this.sfCli = sfCli;
         this.localScanner = new LocalProjectScanner(outputChannel);
         this.outputChannel = outputChannel;
         this.globalStoragePath = globalStoragePath;
+    }
+
+    private surfaceObjectListErrorOnce() {
+        const err = this.sfCli.getLastObjectListError();
+        if (!err) { return; }
+        // Only re-notify when the error message changes; otherwise stay quiet so
+        // we don't spam the user on every keystroke that triggers autocomplete.
+        if (err === this.lastSurfacedObjectListError) { return; }
+        this.lastSurfacedObjectListError = err;
+        vscode.window.showWarningMessage(
+            `SOQL Editor: Could not load object list from org (autocomplete may be limited). ${err}`
+        );
     }
 
     private getCacheMaxAgeMs(): number | undefined {
@@ -100,6 +113,11 @@ export class MetadataProvider {
             if (orgObjects.length > 0) {
                 this.saveObjectListToDisk(orgObjects);
                 this.setCurrentOrgCacheSourceState('org');
+            } else {
+                // Surface CLI failure once so the user understands why autocomplete
+                // is showing only the static fallback list instead of org-specific
+                // objects. Subsequent calls within the cache window stay silent.
+                this.surfaceObjectListErrorOnce();
             }
         }
 
@@ -183,7 +201,20 @@ export class MetadataProvider {
     private getCacheDir(): string | undefined {
         const org = this.sfCli.getCurrentOrg();
         if (!org) { return undefined; }
-        return path.join(this.getCacheRootDir(), this.sanitizeOrgCacheKey(org.alias));
+        const root = this.getCacheRootDir();
+        const usernameKey = this.sanitizeOrgCacheKey(org.username || org.alias);
+        const candidate = path.join(root, usernameKey);
+
+        // Backward-compat: if no cache exists under the (preferred) username key,
+        // but one exists under the alias key, return the alias dir so existing
+        // caches keep working without a manual migration.
+        if (org.alias && org.alias !== org.username && !fs.existsSync(candidate)) {
+            const aliasDir = path.join(root, this.sanitizeOrgCacheKey(org.alias));
+            if (fs.existsSync(aliasDir)) {
+                return aliasDir;
+            }
+        }
+        return candidate;
     }
 
     private getCacheRootDir(): string {
@@ -289,13 +320,15 @@ export class MetadataProvider {
         if (!fs.existsSync(root)) { return []; }
 
         const currentOrg = this.sfCli.getCurrentOrg();
-        const currentKey = currentOrg ? this.sanitizeOrgCacheKey(currentOrg.alias) : undefined;
+        const currentKeys = new Set<string>();
+        if (currentOrg?.username) { currentKeys.add(this.sanitizeOrgCacheKey(currentOrg.username)); }
+        if (currentOrg?.alias) { currentKeys.add(this.sanitizeOrgCacheKey(currentOrg.alias)); }
 
         try {
             const dirs = fs.readdirSync(root, { withFileTypes: true })
                 .filter(d => d.isDirectory())
                 .map(d => d.name)
-                .filter(name => name !== currentKey);
+                .filter(name => !currentKeys.has(name));
 
             return dirs.filter(name => {
                 const dirPath = path.join(root, name);

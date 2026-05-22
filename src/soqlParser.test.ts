@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { extractFromObject, extractScopedFromInfo, extractSelectFields, getQueryContext } from './soqlParser';
+import {
+    extractFromObject,
+    extractScopedFromInfo,
+    extractSelectFields,
+    getQueryContext,
+    validateSoqlStructure,
+} from './soqlParser';
 
 describe('extractFromObject', () => {
     it('extracts simple object names', () => {
@@ -97,5 +103,64 @@ describe('getQueryContext', () => {
         const query = "SELECT Id FROM Account WHERE Name = 'Acme' AND Na";
         const ctx = getQueryContext(query, query.length);
         expect(ctx).toEqual({ type: 'where_field', partial: 'Na' });
+    });
+});
+
+describe('validateSoqlStructure', () => {
+    const messages = (q: string) => validateSoqlStructure(q).map(e => e.message);
+
+    it('returns no errors for a well-formed query', () => {
+        expect(messages('SELECT Id, Name FROM Account WHERE Name != null')).toEqual([]);
+    });
+
+    it('flags missing FROM clause', () => {
+        expect(messages('SELECT Id, Name')).toContain('Missing FROM clause');
+    });
+
+    it('flags empty SELECT clause', () => {
+        expect(messages('SELECT FROM Account')).toContain('Empty SELECT clause');
+    });
+
+    it('flags missing comma between SELECT fields', () => {
+        const errs = messages('SELECT Id Name FROM Account');
+        expect(errs.some(m => m.startsWith('Missing comma between SELECT fields'))).toBe(true);
+    });
+
+    it('does not falsely flag function calls / subqueries as missing commas', () => {
+        expect(messages('SELECT Id, FORMAT(CreatedDate) FROM Account')).toEqual([]);
+        expect(messages('SELECT Id, (SELECT Id FROM Contacts) FROM Account')).toEqual([]);
+    });
+
+    it('flags invalid operator runs in WHERE', () => {
+        expect(messages("SELECT Id FROM Account WHERE Name !- 'x'"))
+            .toContain("Invalid operator '!-'");
+        expect(messages('SELECT Id FROM Account WHERE Name => 1'))
+            .toContain("Invalid operator '=>'");
+        expect(messages('SELECT Id FROM Account WHERE Name =! 1'))
+            .toContain("Invalid operator '=!'");
+        expect(messages('SELECT Id FROM Account WHERE Amount == 100'))
+            .toContain("Use '=' instead of '==' in SOQL");
+    });
+
+    it('does not flag valid SOQL operators', () => {
+        const errs = messages(
+            'SELECT Id FROM Account WHERE Name != null AND Amount >= 100 AND Type <> \'Other\' AND Other <= 1'
+        );
+        expect(errs).toEqual([]);
+    });
+
+    it('detects aliased duplicates (SELECT Id, Id alias FROM ...)', () => {
+        const errs = messages('SELECT Id, Id alias FROM Account');
+        expect(errs.some(m => m.startsWith('Duplicate field: Id'))).toBe(true);
+    });
+
+    it('ignores LIMIT-like text inside string literals when counting clauses', () => {
+        const errs = messages("SELECT Id FROM Account WHERE Name LIKE '(LIMIT 5)' LIMIT 10");
+        expect(errs.some(m => m.startsWith('Duplicate LIMIT'))).toBe(false);
+    });
+
+    it('detects duplicate top-level clauses', () => {
+        expect(messages('SELECT Id FROM Account LIMIT 10 LIMIT 20'))
+            .toContain('Duplicate LIMIT clause');
     });
 });

@@ -106,10 +106,18 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                         break;
                     }
                     case 'openRecord': {
+                        // Defense in depth: webview client already filters the link,
+                        // but re-validate here so the server never trusts the message.
+                        const rawId = typeof msg.recordId === 'string' ? msg.recordId : '';
+                        const validId = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(rawId);
                         const org = this.sfCli.getCurrentOrg();
-                        if (org?.instanceUrl) {
-                            const url = `${org.instanceUrl}/${msg.recordId}`;
+                        if (validId && org?.instanceUrl) {
+                            const url = `${org.instanceUrl.replace(/\/$/, '')}/${rawId}`;
                             await vscode.env.openExternal(vscode.Uri.parse(url));
+                        } else if (!validId) {
+                            this.outputChannel.appendLine(
+                                `openRecord rejected: invalid record id "${rawId}"`
+                            );
                         }
                         break;
                     }
