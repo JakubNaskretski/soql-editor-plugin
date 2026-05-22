@@ -95,7 +95,7 @@ cursor --install-extension ./soql-editor-dev-<version>.vsix --force
 
 - `SOQL: Execute Query` (`soqlEditor.executeQuery`)
 - `SOQL: Select Org` (`soqlEditor.selectOrg`)
-- `SOQL: Refresh Object Metadata` (`soqlEditor.refreshMetadata`)
+- `SOQL: Clear Cache` (`soqlEditor.refreshMetadata`)
 - `SOQL: Sync All Metadata from Org` (`soqlEditor.syncMetadata`)
 - `SOQL: Sync Common + Custom Objects (fast)` (`soqlEditor.syncCommonMetadata`)
 

@@ -146,7 +146,20 @@
 
     function persistState() {
         saveCurrentTab();
-        vscode.setState({ tabs, activeTab, orgLabel: currentOrgLabel });
+        // Drop heavy result arrays before persisting — vscode.setState has a
+        // documented silent size limit and 3 tabs * 10k rows can blow past it,
+        // dropping the query text along with the rows. We keep the in-memory
+        // tabs[] full for the live session; only the persisted snapshot is slim.
+        const persistedTabs = tabs.map(tab => ({
+            query: tab.query || '',
+            errors: tab.errors || [],
+            hasResults: false,
+            columns: [],
+            rows: [],
+            rawRows: [],
+            totalSize: 0,
+        }));
+        vscode.setState({ tabs: persistedTabs, activeTab, orgLabel: currentOrgLabel });
     }
 
     function bindResultListeners() {
@@ -214,13 +227,19 @@
     orgLabel.addEventListener('click', () => vscode.postMessage({ type: 'selectOrg' }));
     btnCopyResults.addEventListener('click', () => {
         if (!lastColumns.length) return;
+        // `?? ''` instead of `|| ''` so 0 / false survive once flattenRecordForDisplay
+        // stops stringifying every value.
+        const cell = (v) => (v === null || v === undefined ? '' : String(v));
         const header = lastColumns.join('\t');
-        const body = lastRows.map(r => lastColumns.map(c => r[c] || '').join('\t')).join('\n');
+        const body = lastRows.map(r => lastColumns.map(c => cell(r[c])).join('\t')).join('\n');
         vscode.postMessage({ type: 'copyToClipboard', text: header + '\n' + body });
     });
     btnCopyCSV.addEventListener('click', () => {
         if (!lastColumns.length) return;
-        const csvEsc = (v) => { const s = String(v || ''); return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s; };
+        const csvEsc = (v) => {
+            const s = v === null || v === undefined ? '' : String(v);
+            return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+        };
         const header = lastColumns.map(csvEsc).join(',');
         const body = lastRows.map(r => lastColumns.map(c => csvEsc(r[c])).join(',')).join('\n');
         vscode.postMessage({ type: 'openCSV', text: header + '\n' + body });
@@ -269,12 +288,17 @@
         }
     });
 
+    // Single 'input' listener — combines suggestion/validation debounce with
+    // persistence and re-highlight (was previously split into two separate
+    // listeners that each fired per keystroke).
     input.addEventListener('input', () => {
         navigating = false; // user typed — reset navigation state
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => requestSuggestions(), 180);
         clearTimeout(validationTimer);
         validationTimer = setTimeout(() => requestValidation(), 280);
+        persistState();
+        highlightSoql();
     });
 
     // Hide dropdown on outside click
@@ -284,7 +308,10 @@
         }
     });
 
-    // Reset suggestions when cursor position changes (click or arrow keys)
+    // Reset suggestions when cursor position changes (click or arrow keys).
+    // We early-return on non-navigation keyups so highlightSoql/persistState
+    // don't fire while the user is just moving the caret.
+    const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End']);
     input.addEventListener('mouseup', () => {
         const pos = input.selectionStart;
         if (pos !== lastCursorPos) {
@@ -293,13 +320,11 @@
         }
     });
     input.addEventListener('keyup', (e) => {
-        // Only track cursor movement keys (not handled by autocomplete)
-        if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
-            const pos = input.selectionStart;
-            if (pos !== lastCursorPos) {
-                lastCursorPos = pos;
-                hideDropdown();
-            }
+        if (!NAV_KEYS.has(e.key)) { return; }
+        const pos = input.selectionStart;
+        if (pos !== lastCursorPos) {
+            lastCursorPos = pos;
+            hideDropdown();
         }
     });
 
@@ -361,9 +386,12 @@
         input.focus();
         hideDropdown();
         // If a relationship path segment was just inserted (ending in "."),
-        // immediately request the next level fields to keep chaining fluid.
+        // request the next level fields after a short delay so validation and
+        // highlight have time to settle (avoids race-driven flicker on slow
+        // metadata fetches). Coalesce with the suggestion debounce timer.
         if (item && typeof item.insertText === 'string' && item.insertText.endsWith('.')) {
-            setTimeout(() => requestSuggestions(), 0);
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => requestSuggestions(), 60);
         }
     }
 
@@ -512,6 +540,12 @@
                 btnRun.textContent = '\u25B6 Run';
                 resultsArea.innerHTML = '<div class="error-msg">&#10060; ' + esc(msg.message) + '</div>';
                 tabs[activeTab].hasResults = false;
+                // Clear stale squiggles \u2014 a server-side error supersedes any
+                // local validation diagnostics displayed against the previous text.
+                currentErrors = [];
+                tabs[activeTab].errors = [];
+                renderErrorList();
+                highlightSoql();
                 persistState();
                 break;
 
@@ -772,14 +806,12 @@
     } else {
         renderTabBar();
     }
-    // Save state on change + update highlighting
-    function onInputChange() {
-        persistState();
-        highlightSoql();
-    }
-    input.addEventListener('input', onInputChange);
-    input.addEventListener('change', onInputChange);
-    input.addEventListener('keyup', highlightSoql);
+    // 'input' is the single source of truth for re-render (see above). We only
+    // need a few extra hooks for cases that don't fire 'input':
+    //   - 'change'  → committed value (e.g. drag-replace, programmatic set)
+    //   - 'paste'   → re-highlight after the inserted text settles
+    //   - 'focus'   → ensure highlight reflects current value when tab regains focus
+    input.addEventListener('change', () => { persistState(); highlightSoql(); });
     input.addEventListener('paste', () => setTimeout(highlightSoql, 0));
     input.addEventListener('focus', highlightSoql);
 

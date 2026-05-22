@@ -19,6 +19,12 @@ function flattenValue(out: DisplayRow, keyPath: string, value: any): void {
     }
 
     if (Array.isArray(value)) {
+        // Top-level arrays are intentionally rendered as compact JSON, not
+        // expanded into per-index columns: only *child subqueries* (objects with
+        // a `records` array, handled below) split into multiple cells.
+        // Multi-picklists arrive as semicolon-joined strings from the API so
+        // they go through the scalar path; arrays only appear when a future
+        // platform feature returns one.
         out[keyPath] = JSON.stringify(value);
         return;
     }
@@ -55,7 +61,7 @@ function flattenChildSubquery(
     out[`${keyPath}.done`] = String(payload.done ?? false);
 
     if (records.length === 0) {
-        out[`${keyPath}[0]`] = 'null';
+        // Empty child subqueries: surface only totalSize/done — no phantom "[0]" column.
         return;
     }
 

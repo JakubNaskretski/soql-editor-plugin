@@ -35,6 +35,7 @@ interface FakeSfCli {
         errorMessage?: string;
     }>;
     getObjectList: () => Promise<string[]>;
+    getLastObjectListError: () => string | undefined;
     clearCache: () => void;
 }
 
@@ -70,8 +71,9 @@ function createProvider(opts?: {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'soql-md-provider-'));
     const outputChannel = { appendLine: vi.fn() };
 
+    const username = `${alias}@example.com`;
     const sfCli: FakeSfCli = {
-        getCurrentOrg: () => ({ alias, username: `${alias}@example.com`, instanceUrl: '', isDefault: true }),
+        getCurrentOrg: () => ({ alias, username, instanceUrl: '', isDefault: true }),
         getCachedDescribe: (name: string) => inMemoryDescribe.get(name.toLowerCase()),
         setCachedDescribe: (name: string, describe: SObjectDescribe) => {
             inMemoryDescribe.set(name.toLowerCase(), describe);
@@ -79,11 +81,15 @@ function createProvider(opts?: {
         describeSObject: vi.fn(async (name: string) => describes.get(name.toLowerCase())),
         describeSObjectDetailed: vi.fn(async (name: string) => ({ describe: describes.get(name.toLowerCase()) })),
         getObjectList: vi.fn(async () => opts?.objectList || []),
+        getLastObjectListError: vi.fn(() => undefined),
         clearCache: vi.fn(),
     };
 
     const provider = new MetadataProvider(sfCli as any, outputChannel as any, tmpRoot);
-    const cacheDir = path.join(tmpRoot, 'cache', alias);
+    // Cache dir is keyed by username (stable identifier); falls back to alias for
+    // backward compatibility, but tests should use the username-derived path.
+    const sanitizedUsername = username.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const cacheDir = path.join(tmpRoot, 'cache', sanitizedUsername);
     return { provider, sfCli, tmpRoot, cacheDir };
 }
 
@@ -95,6 +101,23 @@ afterEach(() => {
 });
 
 describe('MetadataProvider (org-first cache strategy)', () => {
+    it('reuses an alias-keyed cache directory when no username-keyed one exists', () => {
+        const alias = 'legacy-org';
+        const { provider, tmpRoot } = createProvider({ alias });
+        // Pre-existing cache under the alias key (how older installs stored it).
+        const legacyDir = path.join(tmpRoot, 'cache', alias);
+        fs.mkdirSync(legacyDir, { recursive: true });
+        fs.writeFileSync(
+            path.join(legacyDir, '_objectList.json'),
+            JSON.stringify({ objects: ['LegacyObj'], _cachedAt: Date.now() }),
+            'utf-8'
+        );
+
+        const status = provider.getCurrentOrgCacheStatus();
+        expect(status.hasObjectList).toBe(true);
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
     it('infers org cache source for legacy cache dirs without _cacheSource.json', () => {
         const { provider, cacheDir, tmpRoot } = createProvider();
         fs.mkdirSync(cacheDir, { recursive: true });

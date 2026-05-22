@@ -24,9 +24,14 @@ export class LocalProjectScanner {
 
     /**
      * Find all SFDX project roots in the workspace (directories containing sfdx-project.json).
+     *
+     * Returns [] when the workspace is untrusted — sfdx-project.json drives which
+     * directories we read XML from, so a malicious repo could otherwise steer the
+     * scanner across the workspace.
      */
     findProjectRoots(): string[] {
         const roots: string[] = [];
+        if (!vscode.workspace.isTrusted) { return roots; }
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders) { return roots; }
 

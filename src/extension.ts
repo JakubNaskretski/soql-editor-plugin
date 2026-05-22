@@ -198,11 +198,25 @@ export function activate(context: vscode.ExtensionContext) {
 
     outputChannel.appendLine('SOQL Editor activated');
 
-    // Ensure .soql-cache is in .git/info/exclude for all workspace repos
-    addToGitExclude(outputChannel);
-
-    // Offer to migrate legacy .soql-cache to globalStorage
-    migrateLegacyCache(context.globalStorageUri.fsPath, context.globalState, outputChannel);
+    // Workspace-trust gate: skip filesystem mutations and local-project scanning
+    // when the workspace is untrusted (the user opened a folder in "limited" mode).
+    if (vscode.workspace.isTrusted) {
+        const autoExclude = vscode.workspace
+            .getConfiguration('soqlEditor')
+            .get<boolean>('autoExcludeLegacyCache', true);
+        if (autoExclude) {
+            addToGitExclude(outputChannel);
+        } else {
+            outputChannel.appendLine(
+                'soqlEditor.autoExcludeLegacyCache=false; not touching .git/info/exclude.'
+            );
+        }
+        migrateLegacyCache(context.globalStorageUri.fsPath, context.globalState, outputChannel);
+    } else {
+        outputChannel.appendLine(
+            'Workspace is untrusted: skipping .git/info/exclude write and legacy .soql-cache migration.'
+        );
+    }
 }
 
 export async function maybePromptForMetadataReadiness(
@@ -406,6 +420,13 @@ async function migrateLegacyCache(globalStoragePath: string, globalState: vscode
 function copyDirRecursive(src: string, dest: string) {
     fs.mkdirSync(dest, { recursive: true });
     for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        // Skip any symlink entry — a malicious workspace could plant
+        // `.soql-cache/dir/file -> /etc/passwd` and turn migration into an
+        // arbitrary read (or, with "Delete Old", an arbitrary unlink).
+        // withFileTypes uses lstat semantics, so this catches all symlinks.
+        if (entry.isSymbolicLink()) {
+            continue;
+        }
         const srcPath = path.join(src, entry.name);
         const destPath = path.join(dest, entry.name);
         if (entry.isDirectory()) {

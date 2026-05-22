@@ -47,6 +47,7 @@ export class SfCliService {
     private metadataCache: Map<string, SObjectDescribe> = new Map();
     private objectListCache: string[] | undefined;
     private outputChannel: vscode.OutputChannel;
+    private lastObjectListError: string | undefined;
 
     private logEmitter = new vscode.EventEmitter<{ level: string; message: string }>();
     public readonly onLog = this.logEmitter.event;
@@ -121,6 +122,10 @@ export class SfCliService {
 
     /**
      * Get list of all SObject API names for the current org.
+     *
+     * On CLI failure, logs and returns `[]` (so autocomplete keeps working from
+     * disk/fallback) but exposes the failure message via `getLastObjectListError`
+     * so callers can surface a one-shot status notification.
      */
     async getObjectList(): Promise<string[]> {
         if (this.objectListCache) {
@@ -132,11 +137,18 @@ export class SfCliService {
             const result = this.runCliSync(['sobject', 'list', '--json', ...targetOrgArgs]);
             const parsed = JSON.parse(result);
             this.objectListCache = parsed.result || [];
+            this.lastObjectListError = undefined;
             return this.objectListCache!;
         } catch (err: any) {
-            this.log('error', `Failed to list objects: ${err.message}`);
+            this.lastObjectListError = err?.message || 'sf sobject list failed';
+            this.log('error', `Failed to list objects: ${this.lastObjectListError}`);
             return [];
         }
+    }
+
+    /** Returns the last error message from `getObjectList`, or undefined on success. */
+    getLastObjectListError(): string | undefined {
+        return this.lastObjectListError;
     }
 
     /**
@@ -199,10 +211,10 @@ export class SfCliService {
         }
         args.push(...this.getTargetOrgArgs());
 
-        // Keep logs useful without leaking full query text.
-        this.log('cmd', `sf data query --json --result-format json (query redacted, length=${query.length})`);
-
-        const stdout = await this.runCliAsync(args);
+        // Pass the redacted log line as logLabel so runCliAsync doesn't emit a
+        // second `sf data query ...` line that would leak the full query in argv.
+        const logLabel = `sf data query --json --result-format json (query redacted, length=${query.length})`;
+        const stdout = await this.runCliAsync(args, { logLabel });
         try {
             const parsed = JSON.parse(stdout);
             if (parsed.status === 0) {
@@ -221,8 +233,45 @@ export class SfCliService {
         return [];
     }
 
+    /**
+     * Redact sensitive values from CLI argv before logging.
+     *
+     * Handles both forms accepted by oclif-style CLIs:
+     *   - separated:  `['--query', 'SELECT ...']`  → value redacted
+     *   - inline:     `['--query=SELECT ...']`     → value after `=` redacted
+     *
+     * Centralized so future flag additions only need a single allowlist update.
+     */
+    private redactArgsForLog(args: string[]): string {
+        // Long and short forms of every sensitive flag. We don't currently
+        // emit the short forms, but listing them keeps the allowlist a single
+        // source of truth if a caller ever switches.
+        const SENSITIVE = new Set([
+            '--query', '-q',
+            '--password', '-p',
+            '--token',
+        ]);
+        const safe: string[] = [];
+        for (let i = 0; i < args.length; i++) {
+            const arg = args[i];
+            // Inline form: --flag=value or -q=value
+            const eqIdx = arg.indexOf('=');
+            if (eqIdx > 0 && SENSITIVE.has(arg.slice(0, eqIdx))) {
+                safe.push(`${arg.slice(0, eqIdx)}=<redacted>`);
+                continue;
+            }
+            safe.push(arg);
+            // Separated form: --flag value / -q value
+            if (SENSITIVE.has(arg) && i + 1 < args.length) {
+                safe.push('<redacted>');
+                i++;
+            }
+        }
+        return safe.join(' ');
+    }
+
     private runCliSync(args: string[]): string {
-        this.log('cmd', `sf ${args.join(' ')}`);
+        this.log('cmd', `sf ${this.redactArgsForLog(args)}`);
         return execFileSync('sf', args, {
             encoding: 'utf-8',
             timeout: 60000,
@@ -234,7 +283,7 @@ export class SfCliService {
         args: string[],
         options?: { timeoutMs?: number; logLabel?: string }
     ): Promise<string> {
-        this.log('cmd', options?.logLabel || `sf ${args[0]} ...`);
+        this.log('cmd', options?.logLabel || `sf ${this.redactArgsForLog(args)}`);
         return new Promise((resolve, reject) => {
             execFile(
                 'sf',

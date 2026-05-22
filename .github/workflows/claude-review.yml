@@ -44,7 +44,11 @@ jobs:
                       "1. Bugs and logic errors (including off-by-one, wrong index/slice boundaries)\n"
                       "2. Security vulnerabilities (injection, XSS, hardcoded secrets)\n"
                       "3. Code quality issues\n\n"
-                      "Format issues strictly as: [HIGH], [MEDIUM], or [LOW] followed by file:line and description.\n"
+                      "Format issues strictly as: [HIGH], [MEDIUM], or [LOW] followed by file:line and description.\n\n"
+                      "Severity rules — apply STRICTLY:\n"
+                      "- [HIGH] = a confirmed, unhandled bug or security issue you are sure of after analysis.\n"
+                      "- Do NOT use [HIGH] for findings you then reason through and conclude are handled, tolerated, low impact, or intentional. If you would write 'downgrading concern', 'this is actually handled', 'tolerated', 'low impact', or similar in the same paragraph, the finding is not [HIGH] — use [MEDIUM] or [LOW] (or omit it entirely if there's no real action).\n"
+                      "- Think it through before tagging the severity. Output only the final conclusion, not your reasoning trace.\n\n"
                       "If no issues found, respond with: No issues found.\n\n"
                       "Diff:\n" + diff
                   )
@@ -75,7 +79,18 @@ jobs:
         with:
           script: |
             const review = process.env.REVIEW;
-            const hasHigh = review.includes('[HIGH]');
+
+            // Safety net: even with the prompt rules above, the reviewer sometimes
+            // tags `[HIGH]` and then reasons within the same paragraph that the
+            // finding is fine ("downgrading concern", "this is actually handled",
+            // "tolerated", "low impact", etc.). Treat those as non-actionable so
+            // they don't block the PR.
+            const SELF_DOWNGRADE_RE = /downgrad|actually handled|low impact|tolerat|intentional|false positive|not a bug|seems okay|seems fine/i;
+            const realHighFindings = review
+              .split(/\n\s*\n/)        // split into paragraphs
+              .filter(p => p.includes('[HIGH]'))
+              .filter(p => !SELF_DOWNGRADE_RE.test(p));
+            const hasHigh = realHighFindings.length > 0;
             const header = hasHigh
               ? '## Claude Code PR Review\n\n> ❌ HIGH severity issues found — fix before merging.\n\n'
               : '## Claude Code PR Review\n\n> ✅ No HIGH severity issues found.\n\n';

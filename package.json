@@ -24,6 +24,12 @@
     "onView:soqlEditor.panel"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Local SFDX project scanning (sfdx-project.json paths, object metadata XML) and legacy .soql-cache migration are disabled in untrusted workspaces to avoid following malicious paths."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -138,6 +144,11 @@
           "default": 5000,
           "minimum": 0,
           "description": "Show the long-running query warning when COUNT() is above this record threshold. Set to 0 to warn for any positive count."
+        },
+        "soqlEditor.autoExcludeLegacyCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "On startup, append '.soql-cache' to each workspace folder's .git/info/exclude so the legacy cache folder is not tracked. Disable if you'd rather manage your own exclude rules."
         }
       }
     }

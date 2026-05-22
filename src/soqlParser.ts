@@ -365,6 +365,12 @@ function isWordTokenAt(textUpper: string, index: number, token: string): boolean
 
 /**
  * Extract SELECT field list from a SOQL query string.
+ *
+ * Returns only non-empty trimmed slots — leading/trailing commas and double
+ * commas (`SELECT Id, , Name`) silently drop the empty slot. Callers that
+ * need to distinguish "2 fields" from "2 fields + empty trailing slot" should
+ * use {@link validateSoqlStructure}, which reports trailing/leading commas as
+ * separate diagnostics.
  */
 export function extractSelectFields(text: string): string[] {
     const selectMatch = /\bSELECT\b/i.exec(text);
@@ -409,6 +415,74 @@ function findTopLevelFromIndex(text: string, start: number): number {
         }
     }
     return -1;
+}
+
+/**
+ * Like {@link splitTopLevelCsv} but returns offset metadata for each slot so
+ * callers can report accurate error positions even when several slots share
+ * the same text (e.g. `SELECT Name, Name Name FROM ...`).
+ *
+ * `start` is the offset (into the input string) of the first non-whitespace
+ * character of the slot, or the comma position if the slot is empty.
+ */
+function splitTopLevelCsvWithOffsets(input: string): { value: string; start: number }[] {
+    const parts: { value: string; start: number }[] = [];
+    let current = '';
+    let depth = 0;
+    let inString = false;
+    let slotStart = 0;
+    let slotStartedAt = -1; // offset of first non-whitespace in current slot
+
+    const finalizeSlot = (atIndex: number) => {
+        const value = current.trim();
+        const start = slotStartedAt >= 0 ? slotStartedAt : atIndex;
+        parts.push({ value, start });
+        current = '';
+        slotStartedAt = -1;
+    };
+
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+        if (ch === "'" && (i === 0 || input[i - 1] !== '\\')) {
+            inString = !inString;
+            if (slotStartedAt < 0) { slotStartedAt = i; }
+            current += ch;
+            continue;
+        }
+        if (!inString) {
+            if (ch === '(') { depth++; if (slotStartedAt < 0) { slotStartedAt = i; } current += ch; continue; }
+            if (ch === ')' && depth > 0) { depth--; current += ch; continue; }
+            if (ch === ',' && depth === 0) {
+                finalizeSlot(i);
+                slotStart = i + 1;
+                continue;
+            }
+        }
+        if (slotStartedAt < 0 && !/\s/.test(ch)) { slotStartedAt = i; }
+        current += ch;
+    }
+    finalizeSlot(slotStart);
+    return parts;
+}
+
+/**
+ * Replace each string literal in `text` with same-length spaces so that
+ * downstream scans never accidentally match SOQL syntax inside string content.
+ * Preserves character offsets — error positions stay accurate.
+ */
+function stripStringLiterals(text: string): string {
+    let out = '';
+    let inString = false;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+            inString = !inString;
+            out += ' ';
+            continue;
+        }
+        out += inString ? ' ' : ch;
+    }
+    return out;
 }
 
 function splitTopLevelCsv(input: string): string[] {
@@ -474,6 +548,17 @@ export interface SoqlError {
 
 export function validateSoqlStructure(text: string): SoqlError[] {
     const errors: SoqlError[] = [];
+    const pushErrorAt = (message: string, offset: number, length: number) => {
+        const safeOffset = Math.max(0, Math.min(offset, text.length));
+        const line = text.substring(0, safeOffset).split('\n').length - 1;
+        const lineStart = text.lastIndexOf('\n', safeOffset - 1) + 1;
+        errors.push({
+            message,
+            line,
+            startCol: safeOffset - lineStart,
+            endCol: safeOffset - lineStart + Math.max(1, length),
+        });
+    };
 
     // Check unmatched parentheses
     let depth = 0;
@@ -520,6 +605,28 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     // SELECT clause checks
     const selectToFrom = text.match(/\bSELECT\s+([\s\S]*?)\bFROM\b/i);
 
+    // Missing FROM clause — a query that starts with SELECT must have a top-level FROM.
+    // `findKeywordHits` is depth/string-aware on its own, so this check is safe to
+    // run even when other errors are already present (unmatched parens, unclosed
+    // strings) — the user still benefits from seeing the FROM diagnostic.
+    const selectKeywordMatch = /\bSELECT\b/i.exec(text);
+    if (selectKeywordMatch) {
+        const hits = findKeywordHits(text, 'FROM').filter(h => h.depth === 0);
+        if (hits.length === 0) {
+            pushErrorAt(
+                'Missing FROM clause',
+                selectKeywordMatch.index,
+                'SELECT'.length
+            );
+        }
+    }
+
+    // Empty SELECT field list — e.g. "SELECT FROM Account"
+    if (selectToFrom && selectToFrom[1].trim().length === 0) {
+        const selectStart = text.toUpperCase().indexOf('SELECT');
+        pushErrorAt('Empty SELECT clause', selectStart, 'SELECT'.length);
+    }
+
     // Trailing comma before FROM — e.g. "SELECT Name, FROM Account"
     if (selectToFrom && /,\s*$/.test(selectToFrom[1])) {
         const selectStart = text.toUpperCase().indexOf('SELECT') + 6;
@@ -549,6 +656,39 @@ export function validateSoqlStructure(text: string): SoqlError[] {
         });
     }
 
+    // Missing comma between SELECT fields — e.g. "SELECT Id Name FROM Account"
+    // Heuristic: a "field" returned by splitTopLevelCsv that's actually two bare
+    // identifiers separated by whitespace (and isn't a function call / subquery /
+    // aggregate alias).
+    if (selectToFrom && selectToFrom[1].trim().length > 0) {
+        // The captured group starts inside the regex match, *after* `SELECT\s+`.
+        // Walk past the SELECT keyword and its trailing whitespace to land on
+        // the first character of the captured field list. (Earlier versions
+        // used `match[0].indexOf(match[1])` which mis-locates when the capture
+        // happens to start with the literal text "SELECT ".)
+        const matchStart = selectToFrom.index ?? text.toUpperCase().indexOf('SELECT');
+        let clauseStart = matchStart + 'SELECT'.length;
+        while (clauseStart < text.length && /\s/.test(text[clauseStart])) { clauseStart++; }
+        const fieldClauseRaw = selectToFrom[1];
+        // Walk the clause once, tracking the running offset so the Nth field's
+        // position is found even when an earlier slot has the same text.
+        for (const slot of splitTopLevelCsvWithOffsets(fieldClauseRaw)) {
+            const field = slot.value.trim();
+            if (!field) { continue; }
+            if (field.startsWith('(')) { continue; }                      // subquery
+            if (/[(){}]/.test(field)) { continue; }                        // function/aggregate
+            const idTokens = field.match(/[A-Za-z_][A-Za-z0-9_.]*/g) || [];
+            if (idTokens.length >= 2 && !/[(),]/.test(field)) {
+                // slot.start points at the first non-whitespace char of the slot.
+                pushErrorAt(
+                    `Missing comma between SELECT fields: '${field}'`,
+                    clauseStart + slot.start,
+                    field.length
+                );
+            }
+        }
+    }
+
     // Duplicate fields in SELECT — e.g. "SELECT Name, Name FROM Account"
     if (selectToFrom && selectToFrom[1].trim().length > 0) {
         const selectStart = text.toUpperCase().indexOf('SELECT') + 6;
@@ -558,7 +698,9 @@ export function validateSoqlStructure(text: string): SoqlError[] {
             // Skip aggregates, subqueries, FIELDS()
             if (/^(COUNT|AVG|SUM|MIN|MAX|COUNT_DISTINCT|FIELDS)\s*\(/i.test(fields[fi])) { continue; }
             if (fields[fi].startsWith('(')) { continue; }
-            const key = fields[fi].toLowerCase();
+            // Strip optional alias (e.g. "Id alias" → "Id") for duplicate detection only.
+            const fieldHead = fields[fi].split(/\s+/)[0];
+            const key = fieldHead.toLowerCase();
             if (seen.has(key)) {
                 // Find the position of this duplicate in the original text
                 // Search for the nth occurrence of this field in the SELECT clause
@@ -567,8 +709,8 @@ export function validateSoqlStructure(text: string): SoqlError[] {
                 let occurrences = 0;
                 const targetOccurrence = seen.get(key)! + 1; // we want the one after the first
                 let matchIdx = -1;
-                // Count occurrences of this field to find the duplicate
-                const fieldRegex = new RegExp('\\b' + fields[fi].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'gi');
+                // Count occurrences of the field HEAD (alias-stripped) to find the duplicate
+                const fieldRegex = new RegExp('\\b' + fieldHead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'gi');
                 let m;
                 let occCount = 0;
                 while ((m = fieldRegex.exec(fieldClause)) !== null) {
@@ -583,10 +725,10 @@ export function validateSoqlStructure(text: string): SoqlError[] {
                     const line = text.substring(0, absOffset).split('\n').length - 1;
                     const lineStart = text.lastIndexOf('\n', absOffset) + 1;
                     errors.push({
-                        message: `Duplicate field: ${fields[fi]}`,
+                        message: `Duplicate field: ${fieldHead}`,
                         line,
                         startCol: absOffset - lineStart,
-                        endCol: absOffset - lineStart + fields[fi].length,
+                        endCol: absOffset - lineStart + fieldHead.length,
                     });
                 }
             } else {
@@ -595,18 +737,28 @@ export function validateSoqlStructure(text: string): SoqlError[] {
         }
     }
 
-    // Invalid operator == (SOQL uses =)
-    const doubleEquals = /(?<!=)={2}(?!=)/.exec(text);
-    if (doubleEquals) {
-        const idx = doubleEquals.index;
-        const line = text.substring(0, idx).split('\n').length - 1;
-        const lineStart = text.lastIndexOf('\n', idx) + 1;
-        errors.push({
-            message: "Use '=' instead of '==' in SOQL",
-            line,
-            startCol: idx - lineStart,
-            endCol: idx - lineStart + 2,
-        });
+    // Invalid operator characters outside string literals.
+    // Valid SOQL comparison operators: = != <> < > <= >=
+    // Anything else built from [= ! < >] (incl. ==, => , =! , <<, >>, !! , !-, etc.)
+    // is flagged. Operates on a string-stripped copy so quoted literals are ignored.
+    {
+        const stripped = stripStringLiterals(text);
+        const VALID_OPS = new Set(['=', '!=', '<>', '<', '>', '<=', '>=']);
+        const opRegex = /[=!<>][=!<>\-+]*/g;
+        let m: RegExpExecArray | null;
+        while ((m = opRegex.exec(stripped)) !== null) {
+            const token = m[0];
+            // Skip valid operators (exact match)
+            if (VALID_OPS.has(token)) { continue; }
+            // Also tolerate `=` immediately followed by `-`/`+` digits (e.g. value `=-1`)
+            // by stripping a single trailing sign char and re-checking.
+            const trimmedToken = token.replace(/[+\-]$/, '');
+            if (VALID_OPS.has(trimmedToken)) { continue; }
+            const detail = token === '=='
+                ? "Use '=' instead of '==' in SOQL"
+                : `Invalid operator '${token}'`;
+            pushErrorAt(detail, m.index, token.length);
+        }
     }
 
     // HAVING without GROUP BY
@@ -623,26 +775,12 @@ export function validateSoqlStructure(text: string): SoqlError[] {
         });
     }
 
-    // Duplicate top-level clauses (outside subqueries)
-    const clausePattern = /\b(WHERE|ORDER\s+BY|GROUP\s+BY|LIMIT|OFFSET)\b/gi;
+    // Duplicate top-level clauses (outside subqueries, outside string literals)
     const clauseCounts = new Map<string, { count: number; lastIdx: number }>();
-    let clauseMatch;
-    let parenDepth = 0;
-    // Track paren depth for each position
-    const parenDepths: number[] = new Array(text.length).fill(0);
-    let pd = 0;
-    for (let i = 0; i < text.length; i++) {
-        if (text[i] === '(') { pd++; }
-        if (text[i] === ')') { pd--; }
-        parenDepths[i] = pd;
-    }
-    while ((clauseMatch = clausePattern.exec(text)) !== null) {
-        if (parenDepths[clauseMatch.index] > 0) { continue; } // inside subquery
-        const key = clauseMatch[1].toUpperCase().replace(/\s+/g, ' ');
-        const entry = clauseCounts.get(key) || { count: 0, lastIdx: 0 };
-        entry.count++;
-        entry.lastIdx = clauseMatch.index;
-        clauseCounts.set(key, entry);
+    for (const phrase of ['WHERE', 'ORDER BY', 'GROUP BY', 'LIMIT', 'OFFSET']) {
+        const hits = findKeywordHits(text, phrase).filter(h => h.depth === 0);
+        if (hits.length === 0) { continue; }
+        clauseCounts.set(phrase, { count: hits.length, lastIdx: hits[hits.length - 1].index });
     }
     for (const [clause, { count, lastIdx }] of clauseCounts) {
         if (count > 1) {

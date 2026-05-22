@@ -357,7 +357,7 @@ body {
 </head>
 <body>
 
-<div id="jsCheck" style="padding:8px;color:red;font-weight:bold;font-size:13px;border-bottom:2px solid red;">JS NOT LOADED - scripts may be blocked</div>
+<div id="jsCheck" style="padding:8px;color:red;font-weight:bold;font-size:13px;border-bottom:2px solid red;">JS NOT LOADED - out/panel.js missing or failed to load</div>
 
 <div style="padding: 4px 8px; font-size: 10px; font-style: italic; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-panel-border);">
     This extension is in beta. Use at your own risk.
