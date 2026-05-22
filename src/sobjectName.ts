@@ -14,16 +14,19 @@
  *
  * Path-traversal guarantee: only [A-Za-z0-9_] allowed — no '.', '/', '\\'.
  */
+// The leading `(?!.*__r$)` lookahead rejects relationship-suffixed names
+// directly. (Without it, the alternation would otherwise admit `Foo__r` as
+// `Foo__` (NS) + `r` (body) — see the matching regression test.)
 const SOBJECT_API_NAME_RE =
-    /^(?:[A-Za-z][A-Za-z0-9]*__)?[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*(?:__(?:c|mdt|e|x|b))?$/;
+    /^(?!.*__r$)(?:[A-Za-z][A-Za-z0-9]*__)?[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*(?:__(?:c|mdt|e|x|b))?$/;
 
 export function normalizeSObjectApiName(name: string): string | undefined {
     const trimmed = name.trim();
     if (!trimmed) { return undefined; }
     if (!SOBJECT_API_NAME_RE.test(trimmed)) { return undefined; }
-    // The regex above admits `Foo__r` because `Foo__` can match the optional
-    // namespace prefix and `r` matches the body. This explicit check is the
-    // load-bearing one for rejecting relationship-suffixed names.
+    // Defense in depth: the lookahead above already rejects __r, but a stray
+    // regex edit could remove the guard silently — keep this explicit reject
+    // so the contract holds even if the regex regresses.
     if (/__r$/.test(trimmed)) { return undefined; }
     return trimmed;
 }

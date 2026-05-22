@@ -662,10 +662,13 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     // aggregate alias).
     if (selectToFrom && selectToFrom[1].trim().length > 0) {
         // The captured group starts inside the regex match, *after* `SELECT\s+`.
-        // Compute its absolute offset so per-slot positions land on the real text.
+        // Walk past the SELECT keyword and its trailing whitespace to land on
+        // the first character of the captured field list. (Earlier versions
+        // used `match[0].indexOf(match[1])` which mis-locates when the capture
+        // happens to start with the literal text "SELECT ".)
         const matchStart = selectToFrom.index ?? text.toUpperCase().indexOf('SELECT');
-        const captureOffsetInMatch = selectToFrom[0].indexOf(selectToFrom[1]);
-        const clauseStart = matchStart + (captureOffsetInMatch >= 0 ? captureOffsetInMatch : 0);
+        let clauseStart = matchStart + 'SELECT'.length;
+        while (clauseStart < text.length && /\s/.test(text[clauseStart])) { clauseStart++; }
         const fieldClauseRaw = selectToFrom[1];
         // Walk the clause once, tracking the running offset so the Nth field's
         // position is found even when an earlier slot has the same text.

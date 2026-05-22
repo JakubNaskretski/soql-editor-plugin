@@ -243,18 +243,25 @@ export class SfCliService {
      * Centralized so future flag additions only need a single allowlist update.
      */
     private redactArgsForLog(args: string[]): string {
-        const SENSITIVE = new Set(['--query', '--password', '--token']);
+        // Long and short forms of every sensitive flag. We don't currently
+        // emit the short forms, but listing them keeps the allowlist a single
+        // source of truth if a caller ever switches.
+        const SENSITIVE = new Set([
+            '--query', '-q',
+            '--password', '-p',
+            '--token',
+        ]);
         const safe: string[] = [];
         for (let i = 0; i < args.length; i++) {
             const arg = args[i];
-            // Inline form: --flag=value
+            // Inline form: --flag=value or -q=value
             const eqIdx = arg.indexOf('=');
-            if (arg.startsWith('--') && eqIdx > 0 && SENSITIVE.has(arg.slice(0, eqIdx))) {
+            if (eqIdx > 0 && SENSITIVE.has(arg.slice(0, eqIdx))) {
                 safe.push(`${arg.slice(0, eqIdx)}=<redacted>`);
                 continue;
             }
             safe.push(arg);
-            // Separated form: --flag value
+            // Separated form: --flag value / -q value
             if (SENSITIVE.has(arg) && i + 1 < args.length) {
                 safe.push('<redacted>');
                 i++;
