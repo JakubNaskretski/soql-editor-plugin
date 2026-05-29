@@ -306,11 +306,20 @@ export async function getSuggestions(
         case 'where_value': {
             const obj = contextObject;
             if (obj) {
-                const desc = await metadata.describeSObject(obj);
+                // Resolve a possibly relationship-qualified field path (e.g.
+                // Account.Industry on Contact) to the target object's field so its
+                // picklist values are offered, not the base object's.
+                const segments = ctx.field.split('.');
+                let current: string | undefined = obj;
+                for (let i = 0; i < segments.length - 1 && current; i++) {
+                    const d = await metadata.describeSObject(current);
+                    const rel = d?.fields.find(f => f.relationshipName?.toLowerCase() === segments[i].toLowerCase());
+                    current = rel && rel.referenceTo.length > 0 ? rel.referenceTo[0] : undefined;
+                }
+                const desc = current ? await metadata.describeSObject(current) : undefined;
                 if (desc) {
-                    const field = desc.fields.find(
-                        f => f.name.toLowerCase() === ctx.field.toLowerCase()
-                    );
+                    const leaf = segments[segments.length - 1].toLowerCase();
+                    const field = desc.fields.find(f => f.name.toLowerCase() === leaf);
                     if (field && field.picklistValues.length > 0) {
                         suggestions = field.picklistValues.map(pv => ({
                             label: pv.label,

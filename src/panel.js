@@ -177,7 +177,7 @@
             td.addEventListener('click', () => {
                 const val = td.textContent;
                 if (val && val !== 'null') {
-                    vscode.postMessage({ type: 'copyToClipboard', text: val });
+                    vscode.postMessage({ type: 'copyToClipboard', text: val, label: 'Value copied' });
                 }
             });
         });
@@ -225,20 +225,28 @@
     btnRun.addEventListener('click', () => runQuery());
     btnLoadMd.addEventListener('click', () => vscode.postMessage({ type: 'loadMetadata' }));
     orgLabel.addEventListener('click', () => vscode.postMessage({ type: 'selectOrg' }));
+    // Prefix a leading =, +, -, @ so the cell can't be interpreted as a formula
+    // when the export is opened in Excel / Google Sheets / LibreOffice (CSV/TSV
+    // formula injection). Values are attacker-influenceable (any org record).
+    const neutralizeFormula = (s) => (/^[=+\-@]/.test(s) ? "'" + s : s);
     btnCopyResults.addEventListener('click', () => {
         if (!lastColumns.length) return;
         // `?? ''` instead of `|| ''` so 0 / false survive once flattenRecordForDisplay
-        // stops stringifying every value.
-        const cell = (v) => (v === null || v === undefined ? '' : String(v));
+        // stops stringifying every value. Tabs/newlines collapse to spaces so they
+        // don't break TSV column/row alignment when pasted into a spreadsheet.
+        const cell = (v) => {
+            const s = v === null || v === undefined ? '' : String(v);
+            return neutralizeFormula(s).replace(/[\t\r\n]+/g, ' ');
+        };
         const header = lastColumns.join('\t');
         const body = lastRows.map(r => lastColumns.map(c => cell(r[c])).join('\t')).join('\n');
-        vscode.postMessage({ type: 'copyToClipboard', text: header + '\n' + body });
+        vscode.postMessage({ type: 'copyToClipboard', text: header + '\n' + body, label: 'Results copied to clipboard' });
     });
     btnCopyCSV.addEventListener('click', () => {
         if (!lastColumns.length) return;
         const csvEsc = (v) => {
-            const s = v === null || v === undefined ? '' : String(v);
-            return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+            const s = neutralizeFormula(v === null || v === undefined ? '' : String(v));
+            return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
         };
         const header = lastColumns.map(csvEsc).join(',');
         const body = lastRows.map(r => lastColumns.map(c => csvEsc(r[c])).join(',')).join('\n');
@@ -535,10 +543,21 @@
                 persistState();
                 break;
 
-            case 'error':
+            case 'error': {
                 btnRun.disabled = false;
                 btnRun.textContent = '\u25B6 Run';
-                resultsArea.innerHTML = '<div class="error-msg">&#10060; ' + esc(msg.message) + '</div>';
+                // Show the concise message, and (when present) the full Salesforce
+                // detail \u2014 query echo + caret + explanation \u2014 in a monospace block
+                // so the user can see exactly what/where was incorrect.
+                let errHtml = '<div class="error-msg">&#10060; ' + esc(msg.message) + '</div>';
+                if (msg.detail && msg.detail !== msg.message) {
+                    errHtml += '<pre class="error-detail" style="white-space:pre-wrap;'
+                        + 'font-family:var(--vscode-editor-font-family,monospace);font-size:12px;'
+                        + 'margin-top:8px;padding:8px;overflow:auto;'
+                        + 'border-left:3px solid var(--vscode-editorError-foreground,#f48771);'
+                        + 'opacity:.9;">' + esc(msg.detail) + '</pre>';
+                }
+                resultsArea.innerHTML = errHtml;
                 tabs[activeTab].hasResults = false;
                 // Clear stale squiggles \u2014 a server-side error supersedes any
                 // local validation diagnostics displayed against the previous text.
@@ -548,6 +567,7 @@
                 highlightSoql();
                 persistState();
                 break;
+            }
 
             case 'info':
                 btnRun.disabled = false;
@@ -591,7 +611,9 @@
         const sfIdRegex = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
         const bodyRows = displayedRows.map(row => {
             const cells = columns.map(c => {
-                const val = row[c];
+                // A column present on one record may be absent on another (sparse
+                // results); treat a missing key as null rather than rendering "undefined".
+                const val = (c in row) ? row[c] : 'null';
                 if (val === 'null') return '<td class="null-val">null</td>';
                 if (sfIdRegex.test(val)) {
                     return '<td title="' + esc(val) + '"><a class="sf-id-link" href="#" data-id="' + esc(val) + '">' + esc(val) + '</a></td>';

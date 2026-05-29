@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.9
+
+- Add repository link to the marketplace listing (no functional changes).
+
+## 0.6.8
+
+- Clearer query errors: the Salesforce error code, explanation, and `Row:Column`
+  are parsed out and shown; the editor squiggles the offending token ("Go to
+  Error" / "Show Details"), and the panel shows the full query-echo + caret.
+- Autocomplete & validation correctness:
+  - field suggestions keep working after a child subquery in the SELECT list
+  - `TYPEOF` and field aliases no longer flagged as missing commas / unknown fields
+  - duplicate detection works after subqueries; `INCLUDES`/`EXCLUDES`, multi-field
+    `ORDER BY`, and multi-condition `WHERE` resolve the token at the cursor
+  - relationship-qualified `WHERE` values resolve the related object's picklist
+  - escaped backslashes/quotes no longer trigger false "unclosed string"
+  - basic `LIMIT`/`OFFSET` numeric validation
+- Safety & robustness:
+  - CSV/clipboard export neutralizes spreadsheet formula injection
+  - query text is never surfaced in raw CLI error messages
+  - org/object listing no longer blocks the extension host on activation
+  - cross-org object-list cache cleared on org switch; cache now expires (7 days)
+  - query execution is cancellable; concurrent runs guarded
+
 ## 0.6.7
 
 - Improved query validation:

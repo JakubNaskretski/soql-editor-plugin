@@ -1,7 +1,92 @@
 import * as vscode from 'vscode';
-import { execFile, execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import { normalizeSObjectApiName } from './sobjectName';
 export { normalizeSObjectApiName } from './sobjectName';
+
+/** A SOQL query failure parsed into its useful parts. */
+export interface ParsedQueryError {
+    /** Concise, single-line message suitable for a toast (code + explanation + position). */
+    message: string;
+    /** Full multi-line CLI text (query echo + caret + explanation) for the panel/output. */
+    detail?: string;
+    /** Salesforce error code/name, e.g. INVALID_FIELD, MALFORMED_QUERY. */
+    code?: string;
+    /** 1-based line of the error within the submitted query, if reported. */
+    line?: number;
+    /** 1-based column of the error within the submitted query, if reported. */
+    column?: number;
+}
+
+/** Error thrown by query execution, carrying the parsed Salesforce error detail. */
+export class SoqlQueryError extends Error {
+    readonly code?: string;
+    readonly detail?: string;
+    readonly line?: number;
+    readonly column?: number;
+    constructor(info: ParsedQueryError) {
+        super(info.message);
+        this.name = 'SoqlQueryError';
+        this.code = info.code;
+        this.detail = info.detail;
+        this.line = info.line;
+        this.column = info.column;
+    }
+}
+
+/**
+ * Turn a raw Salesforce CLI error message into a structured, user-readable form.
+ *
+ * The CLI typically returns something like:
+ *   "\nSELECT Naem FROM Account\n       ^\nERROR at Row:1:Column:8\nNo such column 'Naem' on entity 'Account'. ..."
+ * From which we extract the position (Row/Column), a concise human explanation
+ * (the text after the `ERROR at ...` marker), and keep the full text as `detail`
+ * so the caret/position can be shown verbatim.
+ */
+export function parseSoqlQueryError(rawMessage: string, code?: string): ParsedQueryError {
+    const raw = (rawMessage || '').replace(/\r\n/g, '\n');
+    const detail = raw.replace(/^\n+/, '').replace(/\n+$/, '');
+
+    let line: number | undefined;
+    let column: number | undefined;
+    const pos = raw.match(/Row\s*:?\s*(\d+)\s*:?\s*Column\s*:?\s*(\d+)/i);
+    if (pos) {
+        line = Number(pos[1]);
+        column = Number(pos[2]);
+    }
+
+    // Human explanation: prefer the text after the "ERROR at Row:..:Column:.." marker;
+    // otherwise the last meaningful (non-caret) line; otherwise the whole message.
+    let explanation = '';
+    const afterMarker = raw.split(/ERROR at Row\s*:?\s*\d+\s*:?\s*Column\s*:?\s*\d+\s*/i);
+    if (afterMarker.length > 1 && afterMarker[afterMarker.length - 1].trim()) {
+        explanation = afterMarker[afterMarker.length - 1].trim();
+    } else {
+        const meaningful = detail
+            .split('\n')
+            .map(s => s.trim())
+            .filter(Boolean)
+            .filter(s => !/^\^+$/.test(s)); // drop the caret-only line
+        explanation = meaningful.length ? meaningful[meaningful.length - 1] : detail;
+    }
+    explanation = explanation.trim() || 'Query failed';
+
+    const codeClean = code && code !== 'Error' && code !== 'SfError' ? code : undefined;
+    let message = explanation;
+    if (codeClean && !explanation.toUpperCase().startsWith(codeClean.toUpperCase())) {
+        message = `${codeClean}: ${explanation}`;
+    }
+    if (line !== undefined && column !== undefined) {
+        message += ` (line ${line}, column ${column})`;
+    }
+
+    return {
+        message,
+        detail: detail && detail !== explanation ? detail : undefined,
+        code: codeClean,
+        line,
+        column,
+    };
+}
 
 export interface OrgInfo {
     alias: string;
@@ -92,7 +177,7 @@ export class SfCliService {
      */
     async listOrgs(): Promise<OrgInfo[]> {
         try {
-            const result = this.runCliSync(['org', 'list', '--json']);
+            const result = await this.runCliAsync(['org', 'list', '--json']);
             const parsed = JSON.parse(result);
             const orgs: OrgInfo[] = [];
 
@@ -134,7 +219,7 @@ export class SfCliService {
 
         const targetOrgArgs = this.getTargetOrgArgs();
         try {
-            const result = this.runCliSync(['sobject', 'list', '--json', ...targetOrgArgs]);
+            const result = await this.runCliAsync(['sobject', 'list', '--json', ...targetOrgArgs]);
             const parsed = JSON.parse(result);
             this.objectListCache = parsed.result || [];
             this.lastObjectListError = undefined;
@@ -204,7 +289,7 @@ export class SfCliService {
     /**
      * Execute a SOQL query using the Tooling API or regular Data API.
      */
-    async executeQuery(query: string, useToolingApi: boolean = false): Promise<any> {
+    async executeQuery(query: string, useToolingApi: boolean = false, signal?: AbortSignal): Promise<any> {
         const args = ['data', 'query', '--query', query, '--json', '--result-format', 'json'];
         if (useToolingApi) {
             args.push('--use-tooling-api');
@@ -214,16 +299,63 @@ export class SfCliService {
         // Pass the redacted log line as logLabel so runCliAsync doesn't emit a
         // second `sf data query ...` line that would leak the full query in argv.
         const logLabel = `sf data query --json --result-format json (query redacted, length=${query.length})`;
-        const stdout = await this.runCliAsync(args, { logLabel });
+
+        let stdout: string;
         try {
-            const parsed = JSON.parse(stdout);
-            if (parsed.status === 0) {
-                return parsed.result;
-            }
-            throw new Error(parsed.message || 'Query failed');
+            stdout = await this.runCliAsync(args, { logLabel, signal });
         } catch (err: any) {
-            throw new Error(err?.message || 'Failed to parse query result');
+            // `sf` exits non-zero on query errors. Node's error.message embeds the
+            // full argv — including the SOQL, which may contain PII in WHERE
+            // filters — so we never surface it. We parse the CLI's JSON error
+            // envelope (written to stdout) into a structured, readable error.
+            throw this.buildQueryError(err);
         }
+
+        let parsed: any;
+        try {
+            parsed = JSON.parse(stdout);
+        } catch {
+            throw new SoqlQueryError({ message: 'Failed to parse query result returned by the CLI.' });
+        }
+        if (parsed.status === 0) {
+            return parsed.result;
+        }
+        // Non-zero status surfaced on a zero-exit (rare) — parse it the same way.
+        throw new SoqlQueryError(parseSoqlQueryError(parsed.message || '', parsed.name || parsed.code));
+    }
+
+    /** Build a structured, user-readable error from a failed CLI invocation. */
+    private buildQueryError(err: any): SoqlQueryError {
+        if (err?.code === 'ENOENT') {
+            return new SoqlQueryError({ message: 'Salesforce CLI (sf) not found on PATH. Install it and reload VS Code.' });
+        }
+        if (this.isBufferOverflowError(err)) {
+            return new SoqlQueryError({ message: 'Query result is too large to display. Add a LIMIT clause or select fewer fields.' });
+        }
+        const envelope = this.parseEnvelope(err?.stdout);
+        const rawMessage =
+            (typeof envelope?.message === 'string' && envelope.message.trim() ? envelope.message : '') ||
+            (typeof err?.stderr === 'string' ? err.stderr.trim() : '') ||
+            '';
+        if (!rawMessage) {
+            return new SoqlQueryError({ message: 'Query failed (the CLI returned no error detail).' });
+        }
+        return new SoqlQueryError(parseSoqlQueryError(rawMessage, envelope?.name || envelope?.code));
+    }
+
+    private parseEnvelope(stdout: unknown): any | undefined {
+        if (typeof stdout !== 'string' || !stdout.trim()) { return undefined; }
+        try {
+            return JSON.parse(stdout);
+        } catch {
+            return undefined;
+        }
+    }
+
+    private isBufferOverflowError(err: any): boolean {
+        return err?.code === 'ENOBUFS'
+            || err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+            || /maxBuffer|ENOBUFS/i.test(String(err?.message || ''));
     }
 
     private getTargetOrgArgs(): string[] {
@@ -270,32 +402,30 @@ export class SfCliService {
         return safe.join(' ');
     }
 
-    private runCliSync(args: string[]): string {
-        this.log('cmd', `sf ${this.redactArgsForLog(args)}`);
-        return execFileSync('sf', args, {
-            encoding: 'utf-8',
-            timeout: 60000,
-            maxBuffer: 10 * 1024 * 1024,
-        });
-    }
-
     private async runCliAsync(
         args: string[],
-        options?: { timeoutMs?: number; logLabel?: string }
+        options?: { timeoutMs?: number; logLabel?: string; signal?: AbortSignal }
     ): Promise<string> {
         this.log('cmd', options?.logLabel || `sf ${this.redactArgsForLog(args)}`);
         return new Promise((resolve, reject) => {
             execFile(
                 'sf',
                 args,
-                { timeout: options?.timeoutMs ?? 60000, maxBuffer: 10 * 1024 * 1024 },
+                { timeout: options?.timeoutMs ?? 60000, maxBuffer: 10 * 1024 * 1024, signal: options?.signal },
                 (error, stdout, stderr) => {
                 if (stderr && stderr.trim()) {
                     this.log('warn', `stderr: ${stderr.trim()}`);
                 }
                 if (error) {
-                    const wrapped = new Error(error.message) as Error & { code?: string };
+                    // Attach stdout/stderr so callers can recover the CLI's JSON
+                    // error envelope (which carries a clean message) instead of
+                    // surfacing Node's error.message, which embeds the full argv.
+                    const wrapped = new Error(error.message) as Error & {
+                        code?: string; stdout?: string; stderr?: string;
+                    };
                     wrapped.code = (error as any)?.code;
+                    wrapped.stdout = typeof stdout === 'string' ? stdout : '';
+                    wrapped.stderr = typeof stderr === 'string' ? stderr : '';
                     reject(wrapped);
                     return;
                 }

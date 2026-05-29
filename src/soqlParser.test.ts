@@ -182,4 +182,79 @@ describe('validateSoqlStructure', () => {
         expect(messages('SELECT Id FROM Account LIMIT 10 LIMIT 20'))
             .toContain('Duplicate LIMIT clause');
     });
+
+    it('detects duplicate fields that appear after a subquery in the SELECT list', () => {
+        // Regression: the old SELECT/FROM regex truncated the clause at the
+        // subquery's FROM, so duplicates after the subquery went undetected.
+        const errs = messages('SELECT Id, (SELECT Id FROM Contacts), Name, Name FROM Account');
+        expect(errs.some(m => m.startsWith('Duplicate field: Name'))).toBe(true);
+    });
+
+    it('does not flag TYPEOF polymorphic expressions', () => {
+        const q = 'SELECT TYPEOF What WHEN Account THEN Phone WHEN Lead THEN Company ELSE Name END FROM Event';
+        expect(messages(q)).toEqual([]);
+    });
+
+    it('does not flag a closed string literal that ends in a backslash', () => {
+        // SOQL: WHERE Path = 'C:\' AND IsActive = true  (the \\ is one escaped backslash)
+        const errs = messages("SELECT Id FROM Account WHERE Path = 'C:\\\\' AND Name != null");
+        expect(errs).not.toContain('Unclosed string literal');
+    });
+
+    it('does not flag HAVING that appears inside a string literal', () => {
+        const errs = messages("SELECT Id FROM Account WHERE Name LIKE '%HAVING%'");
+        expect(errs).not.toContain('HAVING requires a GROUP BY clause');
+    });
+
+    it('flags a non-numeric LIMIT and accepts a valid LIMIT/OFFSET', () => {
+        expect(messages('SELECT Id FROM Account LIMIT abc'))
+            .toContain('LIMIT requires a non-negative integer');
+        expect(messages('SELECT Id FROM Account LIMIT 10 OFFSET 5')).toEqual([]);
+    });
+
+    it('points each duplicate at its own occurrence (3+ duplicates)', () => {
+        const q = 'SELECT Id, Id, Id FROM Account';
+        const dups = validateSoqlStructure(q).filter(e => e.message === 'Duplicate field: Id');
+        expect(dups.length).toBe(2);
+        // The two duplicates must land on different columns (2nd and 3rd occurrence).
+        expect(new Set(dups.map(d => d.startCol)).size).toBe(2);
+    });
+});
+
+describe('getQueryContext — subquery & multi-clause awareness', () => {
+    it('offers SELECT fields after a child subquery in the field list', () => {
+        const query = 'SELECT Id, (SELECT Id FROM Contacts), Nam';
+        expect(getQueryContext(query, query.length)).toEqual({ type: 'select_fields', partial: 'Nam' });
+    });
+
+    it('still offers SELECT fields after a subquery when an outer FROM follows', () => {
+        const query = 'SELECT Id, (SELECT Id FROM Contacts), Name FROM Account';
+        const cursor = query.indexOf('Name'); // cursor before "Name", still in the SELECT list
+        expect(getQueryContext(query, cursor).type).toBe('select_fields');
+    });
+
+    it('offers field names (not just ASC/DESC) for the second ORDER BY field', () => {
+        const query = 'SELECT Id FROM Account ORDER BY Name, Crea';
+        expect(getQueryContext(query, query.length)).toEqual({ type: 'order_by', partial: 'Crea' });
+    });
+
+    it('offers direction after a completed second ORDER BY field', () => {
+        const query = 'SELECT Id FROM Account ORDER BY Name, CreatedDate ';
+        expect(getQueryContext(query, query.length).type).toBe('order_direction');
+    });
+
+    it('treats INCLUDES as an operator (multi-select picklist value context)', () => {
+        const query = 'SELECT Id FROM Account WHERE Type INCLUDES ';
+        expect(getQueryContext(query, query.length)).toEqual({ type: 'where_value', field: 'Type', partial: '' });
+    });
+
+    it('resolves the field next to the cursor in a multi-condition WHERE', () => {
+        const query = 'SELECT Id FROM Opportunity WHERE Amount > 100 AND StageName = ';
+        expect(getQueryContext(query, query.length)).toEqual({ type: 'where_value', field: 'StageName', partial: '' });
+    });
+
+    it('keeps the relationship prefix on the WHERE value field', () => {
+        const query = 'SELECT Id FROM Contact WHERE Account.Industry = ';
+        expect(getQueryContext(query, query.length)).toEqual({ type: 'where_value', field: 'Account.Industry', partial: '' });
+    });
 });

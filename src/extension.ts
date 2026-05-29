@@ -34,10 +34,26 @@ export function activate(context: vscode.ExtensionContext) {
 
     let firstOrgNotificationPending = true;
 
-    // Notify panel when org changes
+    // Diagnostics (created before the org-change handler so it can re-validate).
+    const diagnosticsProvider = new SoqlDiagnosticsProvider(sfCli, metadata);
+
+    // Single org-change handler (consolidated; previously two separate listeners
+    // were registered, neither disposed).
     orgPicker.onOrgChanged(async (org) => {
         await context.globalState.update(LAST_SELECTED_ORG_KEY, org.username);
+
+        // Drop the shared, non-per-org in-memory caches so the new org never
+        // briefly serves the previous org's object list (30s TTL window).
+        metadata.clearInMemoryCaches();
+
         panelProvider.notifyOrgChanged(org);
+
+        // Re-validate all open SOQL files against the new org's metadata.
+        for (const doc of vscode.workspace.textDocuments) {
+            if (doc.languageId === 'soql') {
+                diagnosticsProvider.scheduleValidation(doc);
+            }
+        }
 
         const promptType: 'startup' | 'switch' = firstOrgNotificationPending ? 'startup' : 'switch';
         firstOrgNotificationPending = false;
@@ -50,9 +66,6 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Autocomplete
     const completionProvider = new SoqlCompletionProvider(metadata);
-
-    // Diagnostics
-    const diagnosticsProvider = new SoqlDiagnosticsProvider(sfCli, metadata);
 
     // Query execution
     const queryExecutor = new QueryExecutor(sfCli, metadata, outputChannel);
@@ -173,15 +186,7 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Re-validate and re-fetch metadata when org changes
-    orgPicker.onOrgChanged(() => {
-        // Re-validate all open SOQL files
-        for (const doc of vscode.workspace.textDocuments) {
-            if (doc.languageId === 'soql') {
-                diagnosticsProvider.scheduleValidation(doc);
-            }
-        }
-    });
+    // (org-change re-validation is handled by the consolidated handler above)
 
     // Validate already-open documents
     for (const doc of vscode.workspace.textDocuments) {

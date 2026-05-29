@@ -19,6 +19,11 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
     private outputChannel: vscode.OutputChannel;
     private extensionUri: vscode.Uri;
     private logSubscription?: vscode.Disposable;
+    private executing = false;
+
+    /** Upper bound on rows shipped to the webview, to avoid cloning an unbounded
+     *  result set across the postMessage boundary on a "Fetch all". */
+    private static readonly MAX_PANEL_ROWS = 50000;
 
     constructor(sfCli: SfCliService, metadata: MetadataProvider, outputChannel: vscode.OutputChannel, extensionUri: vscode.Uri) {
         this.sfCli = sfCli;
@@ -93,7 +98,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                         break;
                     case 'copyToClipboard':
                         await vscode.env.clipboard.writeText(msg.text);
-                        this.postMessage({ type: 'toast', message: 'Results copied to clipboard' });
+                        this.postMessage({ type: 'toast', message: msg.label || 'Copied to clipboard' });
                         break;
                     case 'openCSV': {
                         const csvDoc = await vscode.workspace.openTextDocument({ content: msg.text, language: 'csv' });
@@ -220,51 +225,78 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
             return;
         }
 
+        // Re-entrancy guard: overlapping runs race on the results message — a slower
+        // earlier query could overwrite a later one (last-to-arrive wins).
+        if (this.executing) {
+            this.postMessage({ type: 'info', message: 'A query is already running' });
+            return;
+        }
+        this.executing = true;
+
         // Notify UI immediately so users get instant feedback on Run/Cmd+Enter,
         // even while preflight checks are still running.
         this.postMessage({ type: 'queryStarted' });
 
-        // Safety: if no LIMIT, run a COUNT() first to warn the user
-        if (!hasLimitClause(query)) {
-            const countQuery = buildCountQuery(query);
-            if (countQuery) {
-                this.postMessage({ type: 'log', level: 'cmd', message: 'Preparing COUNT() preflight query' });
-                try {
-                    const countResult = await this.sfCli.executeQuery(countQuery);
-                    const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
-                    const threshold = this.getSlowQueryWarningThreshold();
-                    if (shouldPromptForCount(totalRows, threshold)) {
-                        const choice = await vscode.window.showWarningMessage(
-                            `Query matches ${totalRows} records. Run it?`,
-                            { modal: false },
-                            'Add LIMIT 200',
-                            'Add LIMIT 2000',
-                            `Fetch all ${totalRows}`
+        try {
+            // Safety: if no LIMIT, run a COUNT() first to warn the user
+            if (!hasLimitClause(query)) {
+                const countQuery = buildCountQuery(query);
+                if (countQuery) {
+                    this.postMessage({ type: 'log', level: 'cmd', message: 'Preparing COUNT() preflight query' });
+                    try {
+                        const countResult = await this.sfCli.executeQuery(countQuery);
+                        const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
+                        const threshold = this.getSlowQueryWarningThreshold();
+                        if (shouldPromptForCount(totalRows, threshold)) {
+                            const choice = await vscode.window.showWarningMessage(
+                                `Query matches ${totalRows} records. Run it?`,
+                                { modal: false },
+                                'Add LIMIT 200',
+                                'Add LIMIT 2000',
+                                `Fetch all ${totalRows}`
+                            );
+                            if (!choice) {
+                                // User dismissed the warning — clear the spinner that
+                                // queryStarted left in place; otherwise the panel stays
+                                // in "Running..." forever.
+                                this.postMessage({ type: 'info', message: 'Query cancelled' });
+                                return;
+                            }
+                            if (choice === 'Add LIMIT 200') {
+                                query = applyLimit(query, 200);
+                            } else if (choice === 'Add LIMIT 2000') {
+                                query = applyLimit(query, 2000);
+                            }
+                        }
+                    } catch (err: any) {
+                        // Surface (don't swallow) the preflight failure, then run anyway.
+                        this.outputChannel.appendLine(
+                            `COUNT preflight failed (running without a size estimate): ${err?.message ?? err}`
                         );
-                        if (!choice) {
-                            // User dismissed the warning — clear the spinner that
-                            // queryStarted left in place; otherwise the panel stays
-                            // in "Running..." forever.
-                            this.postMessage({ type: 'info', message: 'Query cancelled' });
-                            return;
-                        }
-                        if (choice === 'Add LIMIT 200') {
-                            query = applyLimit(query, 200);
-                        } else if (choice === 'Add LIMIT 2000') {
-                            query = applyLimit(query, 2000);
-                        }
                     }
-                } catch {
-                    // COUNT failed (e.g. complex query) — fall through and run anyway
                 }
             }
-        }
 
-        try {
+            // Capture the org now so a mid-query org switch doesn't make us reconcile
+            // (and pollute the cache of) the new org with this query's fields.
+            const orgAtStart = this.sfCli.getCurrentOrg()?.username;
+
             const result = await this.sfCli.executeQuery(query);
-            await this.metadata.reconcileSuccessfulQuery(query);
-            const records: any[] = result.records || [];
-            const totalSize: number = result.totalSize || records.length;
+            if (this.sfCli.getCurrentOrg()?.username === orgAtStart) {
+                await this.metadata.reconcileSuccessfulQuery(query);
+            }
+            const allRecords: any[] = result.records || [];
+            const totalSize: number = result.totalSize || allRecords.length;
+
+            // Bound what we ship to the webview so a huge "Fetch all" can't OOM the
+            // host serializing the full set. Display is further capped client-side.
+            const cap = SoqlPanelProvider.MAX_PANEL_ROWS;
+            const records = allRecords.length > cap ? allRecords.slice(0, cap) : allRecords;
+            if (allRecords.length > cap) {
+                this.outputChannel.appendLine(
+                    `Result set capped at ${cap} rows for display/export (query matched ${totalSize}).`
+                );
+            }
 
             const columns: string[] = [];
             const colSet = new Set<string>();
@@ -281,8 +313,17 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
 
             this.postMessage({ type: 'queryResults', columns, rows, rawRows: records, totalSize });
         } catch (err: any) {
-            this.outputChannel.appendLine(`Panel query error: ${err.message}`);
-            this.postMessage({ type: 'error', message: err.message });
+            this.outputChannel.appendLine(`Panel query error: ${err?.detail ?? err?.message ?? err}`);
+            this.postMessage({
+                type: 'error',
+                message: err?.message ?? 'Query failed',
+                detail: err?.detail,
+                code: err?.code,
+                line: err?.line,
+                column: err?.column,
+            });
+        } finally {
+            this.executing = false;
         }
     }
 

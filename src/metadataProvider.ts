@@ -55,7 +55,7 @@ export class MetadataProvider {
     private getCacheMaxAgeMs(): number | undefined {
         const expiryDays = vscode.workspace
             .getConfiguration('soqlEditor')
-            .get<number>('cacheExpiryDays', 0);
+            .get<number>('cacheExpiryDays', 7);
         if (expiryDays <= 0) {
             return undefined;
         }
@@ -833,6 +833,17 @@ export class MetadataProvider {
     /**
      * Clear the disk cache for the current org.
      */
+    /**
+     * Drop in-memory caches that are NOT keyed per-org so a freshly-selected org
+     * doesn't briefly serve the previous org's data. The object-list cache has a
+     * 30s TTL and is shared across orgs; it must be invalidated on every org
+     * switch (disk/describe caches are per-org and re-read lazily). Does NOT touch
+     * disk, so the newly-selected org keeps its persisted cache.
+     */
+    clearInMemoryCaches() {
+        this.objectListCache = undefined;
+    }
+
     clearDiskCache() {
         const cacheDir = this.getCacheDir();
         if (!cacheDir || !fs.existsSync(cacheDir)) { return; }
