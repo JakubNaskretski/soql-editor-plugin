@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.9
+
+- Add repository link to the marketplace listing (no functional changes).
+
 ## 0.6.8
 
 - Clearer query errors: the Salesforce error code, explanation, and `Row:Column`

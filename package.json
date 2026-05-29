@@ -2,8 +2,12 @@
   "name": "soql-editor",
   "displayName": "SOQL Editor",
   "description": "SOQL editor for Salesforce with smart autocomplete, validation, and multi-org query execution",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "publisher": "Skrety",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JakubNaskretski/soql-editor-plugin.git"
+  },
   "icon": "plugin-icon.png",
   "keywords": [
     "salesforce",
