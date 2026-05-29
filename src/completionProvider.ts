@@ -213,16 +213,34 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         });
     }
 
+    /**
+     * Resolve a (possibly dotted) WHERE field path to its field descriptor,
+     * walking relationship segments to the target object — e.g. `Account.Industry`
+     * on Contact resolves to Account's Industry field, so its picklist values can
+     * be offered. A plain field name resolves directly on the scoped object.
+     */
+    private async resolveFieldForValue(objectName: string, path: string) {
+        const segments = path.split('.');
+        let currentObject = objectName;
+        for (let i = 0; i < segments.length - 1; i++) {
+            const d = await this.metadata.describeSObject(currentObject);
+            if (!d) { return undefined; }
+            const seg = segments[i].toLowerCase();
+            const relField = d.fields.find(f => f.relationshipName?.toLowerCase() === seg);
+            if (!relField || relField.referenceTo.length === 0) { return undefined; }
+            currentObject = relField.referenceTo[0];
+        }
+        const describe = await this.metadata.describeSObject(currentObject);
+        if (!describe) { return undefined; }
+        const leaf = segments[segments.length - 1].toLowerCase();
+        return describe.fields.find(f => f.name.toLowerCase() === leaf);
+    }
+
     private async getValueCompletions(queryText: string, offset: number, fieldName: string): Promise<vscode.CompletionItem[]> {
         const objectName = await this.resolveScopedObject(queryText, offset);
         if (!objectName) { return []; }
 
-        const describe = await this.metadata.describeSObject(objectName);
-        if (!describe) { return []; }
-
-        const field = describe.fields.find(
-            f => f.name.toLowerCase() === fieldName.toLowerCase()
-        );
+        const field = await this.resolveFieldForValue(objectName, fieldName);
         if (!field) {
             return this.getKeywordItems(
                 [...SOQL_BOOLEAN_LITERALS, ...SOQL_DATE_LITERALS],

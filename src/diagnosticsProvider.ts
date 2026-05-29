@@ -121,9 +121,12 @@ export class SoqlDiagnosticsProvider {
                 continue;
             }
             if (fieldRef.startsWith('(')) { continue; }
+            if (/^TYPEOF\b/i.test(fieldRef.trim())) { continue; }   // polymorphic TYPEOF ... END
 
-            // For dotted references like Account.Name, check just the first part
-            const parts = fieldRef.split('.');
+            // Strip an optional alias (e.g. "Name displayName" → "Name"), then for
+            // dotted references like Account.Name check just the relationship root.
+            const head = fieldRef.trim().split(/\s+/)[0];
+            const parts = head.split('.');
             const rootField = parts[0];
 
             if (parts.length > 1) {

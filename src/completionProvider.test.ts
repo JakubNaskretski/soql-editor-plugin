@@ -100,6 +100,34 @@ describe('SoqlCompletionProvider', () => {
         expect(labels).toContain('Contact');
     });
 
+    it('offers picklist values for a relationship-qualified WHERE field', async () => {
+        // Contact has AccountId → Account; Account.Industry is a picklist. The
+        // WHERE value should resolve through the relationship to Account's field.
+        metadata.describeSObject = vi.fn(async (name: string) => {
+            if (name.toLowerCase() === 'account') {
+                return {
+                    fields: [
+                        { name: 'Industry', label: 'Industry', type: 'picklist', nillable: true, referenceTo: [], relationshipName: undefined, picklistValues: [{ label: 'Technology', value: 'Technology' }] },
+                    ],
+                    childRelationships: [],
+                };
+            }
+            return {
+                fields: [
+                    { name: 'Id', label: 'Id', type: 'id', nillable: false, referenceTo: [], relationshipName: undefined, picklistValues: [] },
+                    { name: 'AccountId', label: 'Account ID', type: 'reference', nillable: true, referenceTo: ['Account'], relationshipName: 'Account', picklistValues: [] },
+                ],
+                childRelationships: [],
+            };
+        });
+        provider = new SoqlCompletionProvider(metadata);
+        const text = 'SELECT Id FROM Contact WHERE Account.Industry = ';
+        const document = { getText: () => text, offsetAt: () => text.length } as any;
+        const items = await provider.provideCompletionItems(document, {} as any, {} as any, {} as any);
+        const labels = items.map((i: any) => i.label);
+        expect(labels).toContain('Technology');
+    });
+
     it('ranks relationship traversal with its foreign-key field', async () => {
         const document = {
             getText: () => 'SELECT Acc FROM Contact',

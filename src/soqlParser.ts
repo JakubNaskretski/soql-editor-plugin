@@ -76,14 +76,16 @@ export function getQueryContext(text: string, offset: number): QueryContext {
         return { type: 'nulls_order', partial };
     }
 
-    // Check ORDER BY direction (only after field token + space)
-    const orderTail = beforeRaw.match(/ORDER\s+BY\s+([^)]*)$/i)?.[1] ?? '';
-    if (/\s+[A-Za-z]*$/.test(orderTail)) {
-        return { type: 'order_direction', partial };
-    }
-
-    // Check ORDER BY
-    if (/ORDER\s+BY\s+[^)]*$/i.test(before)) {
+    // Check ORDER BY direction vs. field. ORDER BY can sort on several fields
+    // (`ORDER BY Name, CreatedDate DESC`), so only the CURRENT sort segment
+    // (after the last comma) decides: a completed field token + whitespace means
+    // we're choosing ASC/DESC; otherwise we're still typing a field name.
+    const orderTail = beforeRaw.match(/ORDER\s+BY\s+([^)]*)$/i)?.[1];
+    if (orderTail !== undefined) {
+        const segment = orderTail.split(',').pop() ?? orderTail;
+        if (/^\s*[\w.]+\s+[A-Za-z]*$/.test(segment)) {
+            return { type: 'order_direction', partial };
+        }
         return { type: 'order_by', partial };
     }
 
@@ -98,22 +100,29 @@ export function getQueryContext(text: string, offset: number): QueryContext {
     }
 
     // Check WHERE clause — are we after an operator (typing a value)?
-    const whereValueMatch = before.match(
-        /(?:WHERE|AND|OR)\s+.*?(\w+)\s*(=|!=|<>|<=?|>=?|LIKE|IN|NOT\s+IN|INCLUDES|EXCLUDES)\s*[^,)]*$/i
-    );
-    if (whereValueMatch) {
-        const afterOperator = beforeRaw.match(/(=|!=|<>|<=?|>=?|LIKE|IN|NOT\s+IN|INCLUDES|EXCLUDES)\s*([^,)]*)$/i);
-        if (afterOperator) {
-            const valuePart = afterOperator[2] ?? '';
+    // Anchor to the CURRENT condition (everything after the last top-level
+    // WHERE/AND/OR), so a multi-condition clause resolves the field next to the
+    // cursor instead of the first field in the WHERE clause.
+    const lastConditionStart = findLastConditionStart(beforeRaw);
+    if (lastConditionStart >= 0) {
+        const condition = beforeRaw.slice(lastConditionStart);
+        // field <op> value. Operator alternation orders multi-char and word
+        // operators before their prefixes (INCLUDES before IN, >= before >) and
+        // word-bounds the word operators so `IN` doesn't match inside `INCLUDES`.
+        const opMatch = condition.match(
+            /^\s*([A-Za-z_][\w.]*)\s*(<=|>=|<>|!=|=|<|>|\bLIKE\b|\bNOT\s+IN\b|\bINCLUDES\b|\bEXCLUDES\b|\bIN\b)\s*([\s\S]*)$/i
+        );
+        if (opMatch) {
+            const fieldName = opMatch[1];
+            const valuePart = opMatch[3] ?? '';
             const hasTrailingWhitespace = /\s$/.test(beforeRaw);
             const hasStartedValue = valuePart.trim().length > 0;
             const valueTrimmedEnd = valuePart.replace(/\s+$/, '');
             const startedNextWord = /\s+[A-Za-z_]*$/.test(valueTrimmedEnd);
-            // If value is complete and cursor moved to next token, don't stay in value context.
-            if ((hasTrailingWhitespace && hasStartedValue) || startedNextWord) {
-                // Continue to clause/field transition checks below.
-            } else {
-                return { type: 'where_value', field: whereValueMatch[1], partial };
+            // If the value is complete and the cursor moved to the next token,
+            // fall through to the clause/field transition checks below.
+            if (!((hasTrailingWhitespace && hasStartedValue) || startedNextWord)) {
+                return { type: 'where_value', field: fieldName, partial };
             }
         }
     }
@@ -145,17 +154,45 @@ export function getQueryContext(text: string, offset: number): QueryContext {
         return { type: 'from_object', partial };
     }
 
+    // Check SELECT field list (subquery-aware). Must run before the generic
+    // tail_clause check below, which would otherwise swallow cursor positions
+    // that follow a subquery's FROM in the outer SELECT list
+    // (e.g. `SELECT Id, (SELECT Id FROM Contacts), Nam▌`).
+    if (isInSelectClause(text, offset)) {
+        return { type: 'select_fields', partial };
+    }
+
     // Clause transitions in tail position
     if (/\b(FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY)\b[\s\S]*$/i.test(before) && /\s+[A-Z_]*$/.test(before)) {
         return { type: 'tail_clause', partial };
     }
 
-    // Check SELECT — typing field names
+    // Fallback SELECT detection for malformed/in-progress queries with no FROM yet.
     if (/SELECT\s+[^]*$/i.test(before) && !/\bFROM\b/i.test(before)) {
         return { type: 'select_fields', partial };
     }
 
     return { type: 'unknown' };
+}
+
+/**
+ * True when `offset` sits inside a SELECT field list — i.e. after the SELECT
+ * keyword of its current query scope and at/before that scope's FROM (or that
+ * scope has no FROM yet). Subquery-aware via parenthesis depth, so it correctly
+ * recognizes the outer SELECT list even after a closed child subquery.
+ */
+function isInSelectClause(text: string, offset: number): boolean {
+    const safeOffset = Math.max(0, Math.min(offset, text.length));
+    const depth = getQueryDepthAtOffset(text, safeOffset);
+    const tokens = scanSelectFromTokens(text);
+    const selectTok = findCurrentSelectToken(tokens, safeOffset, depth);
+    if (!selectTok || selectTok.index >= safeOffset) {
+        return false;
+    }
+    const fromTok = tokens.find(
+        t => t.keyword === 'FROM' && t.depth === selectTok.depth && t.index > selectTok.index
+    );
+    return !fromTok || safeOffset <= fromTok.index;
 }
 
 /**
@@ -226,12 +263,48 @@ function readIdentifierAfter(text: string, index: number): string | undefined {
     return m ? m[1] : undefined;
 }
 
+/**
+ * Returns true when the single-quote at `quoteIndex` is escaped by a preceding
+ * backslash. Counts the run of consecutive backslashes — the quote is escaped
+ * only when that count is odd, so an escaped backslash before a closing quote
+ * (e.g. the `'` in `'C:\\'`) correctly terminates the string.
+ */
+function isEscapedQuote(text: string, quoteIndex: number): boolean {
+    let backslashes = 0;
+    let j = quoteIndex - 1;
+    while (j >= 0 && text[j] === '\\') {
+        backslashes++;
+        j--;
+    }
+    return backslashes % 2 === 1;
+}
+
+/**
+ * Return the offset just past the last WHERE/AND/OR keyword in `text`
+ * (string-literal aware, any paren depth), or -1 if none. Used to isolate the
+ * current WHERE condition so value/field context is resolved relative to the
+ * cursor rather than the first condition in the clause.
+ */
+function findLastConditionStart(text: string): number {
+    const hits = [
+        ...findKeywordHits(text, 'WHERE'),
+        ...findKeywordHits(text, 'AND'),
+        ...findKeywordHits(text, 'OR'),
+    ];
+    let last = -1;
+    for (const h of hits) {
+        const end = h.index + h.length;
+        if (end > last) { last = end; }
+    }
+    return last;
+}
+
 export function getQueryDepthAtOffset(text: string, offset: number): number {
     let depth = 0;
     let inString = false;
     for (let i = 0; i < offset && i < text.length; i++) {
         const ch = text[i];
-        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+        if (ch === "'" && !isEscapedQuote(text, i)) {
             inString = !inString;
             continue;
         }
@@ -285,7 +358,7 @@ export function findKeywordHits(text: string, phrase: string): KeywordHit[] {
 
     for (let i = 0; i < text.length; i++) {
         const ch = text[i];
-        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+        if (ch === "'" && !isEscapedQuote(text, i)) {
             inString = !inString;
             continue;
         }
@@ -323,7 +396,7 @@ function scanSelectFromTokens(text: string): Array<{ keyword: 'SELECT' | 'FROM';
 
     for (let i = 0; i < text.length; i++) {
         const ch = text[i];
-        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+        if (ch === "'" && !isEscapedQuote(text, i)) {
             inString = !inString;
             continue;
         }
@@ -390,7 +463,7 @@ function findTopLevelFromIndex(text: string, start: number): number {
 
     for (let i = start; i < text.length; i++) {
         const ch = text[i];
-        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+        if (ch === "'" && !isEscapedQuote(text, i)) {
             inString = !inString;
             continue;
         }
@@ -443,7 +516,7 @@ function splitTopLevelCsvWithOffsets(input: string): { value: string; start: num
 
     for (let i = 0; i < input.length; i++) {
         const ch = input[i];
-        if (ch === "'" && (i === 0 || input[i - 1] !== '\\')) {
+        if (ch === "'" && !isEscapedQuote(input, i)) {
             inString = !inString;
             if (slotStartedAt < 0) { slotStartedAt = i; }
             current += ch;
@@ -475,7 +548,7 @@ function stripStringLiterals(text: string): string {
     let inString = false;
     for (let i = 0; i < text.length; i++) {
         const ch = text[i];
-        if (ch === "'" && (i === 0 || text[i - 1] !== '\\')) {
+        if (ch === "'" && !isEscapedQuote(text, i)) {
             inString = !inString;
             out += ' ';
             continue;
@@ -493,7 +566,7 @@ function splitTopLevelCsv(input: string): string[] {
 
     for (let i = 0; i < input.length; i++) {
         const ch = input[i];
-        if (ch === "'" && (i === 0 || input[i - 1] !== '\\')) {
+        if (ch === "'" && !isEscapedQuote(input, i)) {
             inString = !inString;
             current += ch;
             continue;
@@ -589,7 +662,7 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     // Check for unclosed string literals
     let inString = false;
     for (let i = 0; i < text.length; i++) {
-        if (text[i] === "'" && (i === 0 || text[i - 1] !== '\\')) {
+        if (text[i] === "'" && !isEscapedQuote(text, i)) {
             inString = !inString;
         }
     }
@@ -602,87 +675,64 @@ export function validateSoqlStructure(text: string): SoqlError[] {
         });
     }
 
-    // SELECT clause checks
-    const selectToFrom = text.match(/\bSELECT\s+([\s\S]*?)\bFROM\b/i);
+    // SELECT clause checks — extract the SELECT field list in a paren/string-aware
+    // way. The previous /SELECT\s+(...)\bFROM\b/ regex truncated the clause at the
+    // FIRST FROM, including a subquery's, so these checks operated on the wrong
+    // substring (missing real duplicates, false-flagging valid subqueries).
+    const selectKeyword = /\bSELECT\b/i.exec(text);
+    let selectClause: string | null = null;
+    let selectClauseStart = -1; // offset of the first char after the SELECT keyword
+    if (selectKeyword) {
+        const afterSelect = selectKeyword.index + selectKeyword[0].length;
+        const fromIdx = findTopLevelFromIndex(text, afterSelect);
+        if (fromIdx >= 0) {
+            selectClause = text.slice(afterSelect, fromIdx);
+            selectClauseStart = afterSelect;
+        }
+    }
 
     // Missing FROM clause — a query that starts with SELECT must have a top-level FROM.
     // `findKeywordHits` is depth/string-aware on its own, so this check is safe to
     // run even when other errors are already present (unmatched parens, unclosed
     // strings) — the user still benefits from seeing the FROM diagnostic.
-    const selectKeywordMatch = /\bSELECT\b/i.exec(text);
-    if (selectKeywordMatch) {
+    if (selectKeyword) {
         const hits = findKeywordHits(text, 'FROM').filter(h => h.depth === 0);
         if (hits.length === 0) {
-            pushErrorAt(
-                'Missing FROM clause',
-                selectKeywordMatch.index,
-                'SELECT'.length
-            );
+            pushErrorAt('Missing FROM clause', selectKeyword.index, 'SELECT'.length);
         }
     }
 
     // Empty SELECT field list — e.g. "SELECT FROM Account"
-    if (selectToFrom && selectToFrom[1].trim().length === 0) {
-        const selectStart = text.toUpperCase().indexOf('SELECT');
-        pushErrorAt('Empty SELECT clause', selectStart, 'SELECT'.length);
+    if (selectClause !== null && selectClause.trim().length === 0) {
+        pushErrorAt('Empty SELECT clause', selectKeyword!.index, 'SELECT'.length);
     }
 
     // Trailing comma before FROM — e.g. "SELECT Name, FROM Account"
-    if (selectToFrom && /,\s*$/.test(selectToFrom[1])) {
-        const selectStart = text.toUpperCase().indexOf('SELECT') + 6;
-        const fieldsPart = selectToFrom[1];
-        const commaOffset = selectStart + fieldsPart.lastIndexOf(',');
-        const line = text.substring(0, commaOffset).split('\n').length - 1;
-        const lineStart = text.lastIndexOf('\n', commaOffset) + 1;
-        errors.push({
-            message: 'Trailing comma in SELECT clause',
-            line,
-            startCol: commaOffset - lineStart,
-            endCol: commaOffset - lineStart + 1,
-        });
+    if (selectClause !== null && /,\s*$/.test(selectClause)) {
+        pushErrorAt('Trailing comma in SELECT clause', selectClauseStart + selectClause.lastIndexOf(','), 1);
     }
 
     // Leading comma in SELECT — e.g. "SELECT , Name FROM Account"
-    if (selectToFrom && /^\s*,/.test(selectToFrom[1])) {
-        const selectStart = text.toUpperCase().indexOf('SELECT') + 6;
-        const commaOffset = selectStart + selectToFrom[1].indexOf(',');
-        const line = text.substring(0, commaOffset).split('\n').length - 1;
-        const lineStart = text.lastIndexOf('\n', commaOffset) + 1;
-        errors.push({
-            message: 'Leading comma in SELECT clause',
-            line,
-            startCol: commaOffset - lineStart,
-            endCol: commaOffset - lineStart + 1,
-        });
+    if (selectClause !== null && /^\s*,/.test(selectClause)) {
+        pushErrorAt('Leading comma in SELECT clause', selectClauseStart + selectClause.indexOf(','), 1);
     }
 
     // Missing comma between SELECT fields — e.g. "SELECT Id Name FROM Account"
-    // Heuristic: a "field" returned by splitTopLevelCsv that's actually two bare
-    // identifiers separated by whitespace (and isn't a function call / subquery /
-    // aggregate alias).
-    if (selectToFrom && selectToFrom[1].trim().length > 0) {
-        // The captured group starts inside the regex match, *after* `SELECT\s+`.
-        // Walk past the SELECT keyword and its trailing whitespace to land on
-        // the first character of the captured field list. (Earlier versions
-        // used `match[0].indexOf(match[1])` which mis-locates when the capture
-        // happens to start with the literal text "SELECT ".)
-        const matchStart = selectToFrom.index ?? text.toUpperCase().indexOf('SELECT');
-        let clauseStart = matchStart + 'SELECT'.length;
-        while (clauseStart < text.length && /\s/.test(text[clauseStart])) { clauseStart++; }
-        const fieldClauseRaw = selectToFrom[1];
-        // Walk the clause once, tracking the running offset so the Nth field's
-        // position is found even when an earlier slot has the same text.
-        for (const slot of splitTopLevelCsvWithOffsets(fieldClauseRaw)) {
+    // Heuristic: a "field" slot that's actually two bare identifiers separated by
+    // whitespace, and isn't a function call / subquery / aggregate / TYPEOF.
+    if (selectClause !== null && selectClause.trim().length > 0) {
+        for (const slot of splitTopLevelCsvWithOffsets(selectClause)) {
             const field = slot.value.trim();
             if (!field) { continue; }
             if (field.startsWith('(')) { continue; }                      // subquery
             if (/[(){}]/.test(field)) { continue; }                        // function/aggregate
+            if (/^TYPEOF\b/i.test(field)) { continue; }                    // polymorphic TYPEOF ... END
             const idTokens = field.match(/[A-Za-z_][A-Za-z0-9_.]*/g) || [];
             if (idTokens.length >= 2 && !/[(),]/.test(field)) {
                 // slot.start points at the first non-whitespace char of the slot.
                 pushErrorAt(
                     `Missing comma between SELECT fields: '${field}'`,
-                    clauseStart + slot.start,
+                    selectClauseStart + slot.start,
                     field.length
                 );
             }
@@ -690,49 +740,36 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     }
 
     // Duplicate fields in SELECT — e.g. "SELECT Name, Name FROM Account"
-    if (selectToFrom && selectToFrom[1].trim().length > 0) {
-        const selectStart = text.toUpperCase().indexOf('SELECT') + 6;
-        const fields = splitTopLevelCsv(selectToFrom[1]);
-        const seen = new Map<string, number>(); // lowercase field -> first occurrence index
-        for (let fi = 0; fi < fields.length; fi++) {
-            // Skip aggregates, subqueries, FIELDS()
-            if (/^(COUNT|AVG|SUM|MIN|MAX|COUNT_DISTINCT|FIELDS)\s*\(/i.test(fields[fi])) { continue; }
-            if (fields[fi].startsWith('(')) { continue; }
-            // Strip optional alias (e.g. "Id alias" → "Id") for duplicate detection only.
-            const fieldHead = fields[fi].split(/\s+/)[0];
+    if (selectClause !== null && selectClause.trim().length > 0) {
+        const fields = splitTopLevelCsv(selectClause);
+        const seen = new Set<string>();             // field heads already encountered
+        const reported = new Map<string, number>(); // head -> duplicates already reported
+        for (const rawField of fields) {
+            // Skip aggregates, subqueries, FIELDS(), TYPEOF.
+            if (/^(COUNT|AVG|SUM|MIN|MAX|COUNT_DISTINCT|FIELDS)\s*\(/i.test(rawField)) { continue; }
+            if (rawField.startsWith('(')) { continue; }
+            if (/^TYPEOF\b/i.test(rawField)) { continue; }
+            // Strip an optional alias (e.g. "Id alias" → "Id") for duplicate detection only.
+            const fieldHead = rawField.split(/\s+/)[0];
             const key = fieldHead.toLowerCase();
-            if (seen.has(key)) {
-                // Find the position of this duplicate in the original text
-                // Search for the nth occurrence of this field in the SELECT clause
-                const fieldClause = selectToFrom[1];
-                let searchFrom = 0;
-                let occurrences = 0;
-                const targetOccurrence = seen.get(key)! + 1; // we want the one after the first
-                let matchIdx = -1;
-                // Count occurrences of the field HEAD (alias-stripped) to find the duplicate
-                const fieldRegex = new RegExp('\\b' + fieldHead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'gi');
-                let m;
-                let occCount = 0;
-                while ((m = fieldRegex.exec(fieldClause)) !== null) {
-                    occCount++;
-                    if (occCount > 1) {
-                        matchIdx = m.index;
-                        break;
-                    }
-                }
-                if (matchIdx >= 0) {
-                    const absOffset = selectStart + matchIdx;
-                    const line = text.substring(0, absOffset).split('\n').length - 1;
-                    const lineStart = text.lastIndexOf('\n', absOffset) + 1;
-                    errors.push({
-                        message: `Duplicate field: ${fieldHead}`,
-                        line,
-                        startCol: absOffset - lineStart,
-                        endCol: absOffset - lineStart + fieldHead.length,
-                    });
-                }
-            } else {
-                seen.set(key, fi);
+            if (!seen.has(key)) {
+                seen.add(key);
+                continue;
+            }
+            // Locate the (N+1)-th occurrence of the field head so the 2nd, 3rd, …
+            // duplicates each point at their own position rather than all at the 2nd.
+            const targetOccurrence = (reported.get(key) ?? 0) + 2; // occurrence #1 is the original
+            reported.set(key, (reported.get(key) ?? 0) + 1);
+            const fieldRegex = new RegExp('\\b' + fieldHead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'gi');
+            let m: RegExpExecArray | null;
+            let occ = 0;
+            let matchIdx = -1;
+            while ((m = fieldRegex.exec(selectClause)) !== null) {
+                occ++;
+                if (occ === targetOccurrence) { matchIdx = m.index; break; }
+            }
+            if (matchIdx >= 0) {
+                pushErrorAt(`Duplicate field: ${fieldHead}`, selectClauseStart + matchIdx, fieldHead.length);
             }
         }
     }
@@ -761,18 +798,36 @@ export function validateSoqlStructure(text: string): SoqlError[] {
         }
     }
 
-    // HAVING without GROUP BY
-    if (/\bHAVING\b/i.test(text) && !/\bGROUP\s+BY\b/i.test(text)) {
-        const havingMatch = text.match(/\bHAVING\b/i)!;
-        const idx = havingMatch.index!;
-        const line = text.substring(0, idx).split('\n').length - 1;
-        const lineStart = text.lastIndexOf('\n', idx) + 1;
-        errors.push({
-            message: 'HAVING requires a GROUP BY clause',
-            line,
-            startCol: idx - lineStart,
-            endCol: idx - lineStart + 6,
-        });
+    // HAVING without GROUP BY — both checks are string/paren-aware via
+    // findKeywordHits, so a `HAVING`/`GROUP BY` inside a string literal or a
+    // subquery neither false-flags nor masks a missing top-level GROUP BY.
+    {
+        const havingHits = findKeywordHits(text, 'HAVING').filter(h => h.depth === 0);
+        const groupByHits = findKeywordHits(text, 'GROUP BY').filter(h => h.depth === 0);
+        if (havingHits.length > 0 && groupByHits.length === 0) {
+            pushErrorAt('HAVING requires a GROUP BY clause', havingHits[0].index, 'HAVING'.length);
+        }
+    }
+
+    // LIMIT / OFFSET must be a non-negative integer (or a bind variable like :n).
+    for (const clause of ['LIMIT', 'OFFSET']) {
+        for (const hit of findKeywordHits(text, clause).filter(h => h.depth === 0)) {
+            const after = text.slice(hit.index + hit.length);
+            const m = after.match(/^(\s*)(\S+)/);
+            if (!m) { continue; }                                   // nothing typed yet
+            const leading = m[1].length;
+            // Stop at a following clause / paren so "LIMIT 10)" / "OFFSET 5 FOR" parse.
+            const token = m[2].replace(/[),].*$/, '');
+            if (token.length === 0) { continue; }
+            if (token.startsWith(':')) { continue; }                // bind variable
+            if (!/^\d+$/.test(token)) {
+                pushErrorAt(
+                    `${clause} requires a non-negative integer`,
+                    hit.index + hit.length + leading,
+                    token.length
+                );
+            }
+        }
     }
 
     // Duplicate top-level clauses (outside subqueries, outside string literals)
