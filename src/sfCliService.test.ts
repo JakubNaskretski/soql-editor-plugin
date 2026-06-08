@@ -1,11 +1,35 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// sfCliService imports 'vscode' at module load; the parser under test is pure,
-// so a minimal mock is enough to let the import resolve.
-vi.mock('vscode', () => ({ EventEmitter: class {} }));
+// sfCliService imports 'vscode' at module load. A functional EventEmitter is
+// needed because the service wires `onLog = emitter.event` and `emitter.fire()`
+// on every CLI invocation.
+vi.mock('vscode', () => ({
+    EventEmitter: class {
+        event = () => ({ dispose() {} });
+        fire() {}
+        dispose() {}
+    },
+}));
 
+// Stub the CLI shell-out so openRecord can be exercised without a real `sf`.
+vi.mock('child_process', () => ({ execFile: vi.fn() }));
+
+import { execFile } from 'child_process';
 import { normalizeSObjectApiName } from './sobjectName';
-import { parseSoqlQueryError } from './sfCliService';
+import { parseSoqlQueryError, SfCliService, OrgInfo } from './sfCliService';
+
+const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
+
+function makeService() {
+    return new SfCliService({ appendLine: vi.fn() } as any);
+}
+
+const TEST_ORG: OrgInfo = {
+    alias: 'dev',
+    username: 'dev@example.com',
+    instanceUrl: 'https://example.my.salesforce.com',
+    isDefault: true,
+};
 
 describe('normalizeSObjectApiName', () => {
     it('accepts valid api names', () => {
@@ -66,5 +90,69 @@ describe('parseSoqlQueryError', () => {
 
     it('falls back to a generic message for empty input', () => {
         expect(parseSoqlQueryError('', undefined).message).toBe('Query failed');
+    });
+});
+
+describe('SfCliService.openRecord', () => {
+    beforeEach(() => {
+        execFileMock.mockReset();
+        // Default: the CLI succeeds and invokes its callback with empty output.
+        execFileMock.mockImplementation((_file, _args, _opts, cb) => cb(null, '', ''));
+    });
+
+    it('opens the record through the CLI frontdoor session (sf org open --path)', async () => {
+        const svc = makeService();
+        svc.setCurrentOrg(TEST_ORG);
+
+        const ok = await svc.openRecord('001000000000001');
+
+        expect(ok).toBe(true);
+        expect(execFileMock).toHaveBeenCalledTimes(1);
+        expect(execFileMock.mock.calls[0][1]).toEqual([
+            'org', 'open',
+            '--path', '/001000000000001',
+            '--target-org', 'dev@example.com',
+        ]);
+    });
+
+    it('accepts an 18-character record id', async () => {
+        const svc = makeService();
+        svc.setCurrentOrg(TEST_ORG);
+
+        const ok = await svc.openRecord('001000000000001AAA');
+
+        expect(ok).toBe(true);
+        expect(execFileMock.mock.calls[0][1]).toContain('/001000000000001AAA');
+    });
+
+    it('rejects a malformed record id without shelling out', async () => {
+        const svc = makeService();
+        svc.setCurrentOrg(TEST_ORG);
+
+        const ok = await svc.openRecord('../etc/passwd');
+
+        expect(ok).toBe(false);
+        expect(execFileMock).not.toHaveBeenCalled();
+    });
+
+    it('returns false when no org is selected', async () => {
+        const svc = makeService();
+
+        const ok = await svc.openRecord('001000000000001');
+
+        expect(ok).toBe(false);
+        expect(execFileMock).not.toHaveBeenCalled();
+    });
+
+    it('returns false (so the caller can fall back) when the CLI fails', async () => {
+        execFileMock.mockImplementation((_file, _args, _opts, cb) =>
+            cb(new Error('No authorization information found'), '', '')
+        );
+        const svc = makeService();
+        svc.setCurrentOrg(TEST_ORG);
+
+        const ok = await svc.openRecord('001000000000001');
+
+        expect(ok).toBe(false);
     });
 });
