@@ -324,6 +324,40 @@ export class SfCliService {
         throw new SoqlQueryError(parseSoqlQueryError(parsed.message || '', parsed.name || parsed.code));
     }
 
+    /**
+     * Open a record in the browser using the CLI's authenticated session.
+     *
+     * Opening the bare `instanceUrl/<id>` lands on the org login page whenever the
+     * browser has no active Salesforce session. `sf org open --path /<id>` instead
+     * mints a short-lived frontdoor URL from the CLI's stored auth and opens the
+     * record already logged in. The session id is minted and consumed by the
+     * CLI/browser — it never passes through (or is logged by) this process.
+     *
+     * @returns true if the CLI launched the record; false if there is no current
+     *          org, the id is malformed, or the CLI failed (caller can fall back).
+     */
+    async openRecord(recordId: string): Promise<boolean> {
+        const org = this.currentOrg;
+        if (!org) { return false; }
+        // Defense in depth: only ever hand a strict 15/18-char Salesforce id to the
+        // CLI as a navigation path (mirrors the panel's pre-validation).
+        if (!/^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(recordId)) {
+            this.log('warn', 'openRecord rejected: invalid record id');
+            return false;
+        }
+        try {
+            await this.runCliAsync([
+                'org', 'open',
+                '--path', `/${recordId}`,
+                '--target-org', org.username,
+            ]);
+            return true;
+        } catch (err: any) {
+            this.log('error', `Failed to open record via CLI: ${err.message}`);
+            return false;
+        }
+    }
+
     /** Build a structured, user-readable error from a failed CLI invocation. */
     private buildQueryError(err: any): SoqlQueryError {
         if (err?.code === 'ENOENT') {
