@@ -265,4 +265,36 @@ describe('MetadataProvider (org-first cache strategy)', () => {
         expect((sfCli.describeSObjectDetailed as any).mock.calls[0][1].timeoutMs).toBe(15000);
         fs.rmSync(tmpRoot, { recursive: true, force: true });
     });
+
+    it('syncCommonMetadata syncs packaged non-__c custom objects (__mdt/__e/__x/__b)', async () => {
+        const { provider, sfCli, tmpRoot } = createProvider({
+            objectList: [
+                'Account',
+                'vlocity_cmt__Setting__mdt',
+                'vlocity_cmt__Pricing__e',
+                'ns__External__x',
+                'My_Big__b',
+            ],
+            describes: {
+                account: makeDescribe('Account', ['Id']),
+                'vlocity_cmt__setting__mdt': makeDescribe('vlocity_cmt__Setting__mdt', ['Id']),
+                'vlocity_cmt__pricing__e': makeDescribe('vlocity_cmt__Pricing__e', ['Id']),
+                'ns__external__x': makeDescribe('ns__External__x', ['Id']),
+                'my_big__b': makeDescribe('My_Big__b', ['Id']),
+            },
+        });
+
+        const progress = { report: vi.fn() };
+        const token = { isCancellationRequested: false };
+        await provider.syncCommonMetadata(progress as any, token as any);
+
+        // Before the fix the custom filter was __c-only, so these were never sync
+        // candidates and their fields never autocompleted.
+        const described = (sfCli.describeSObjectDetailed as any).mock.calls.map((c: any[]) => c[0]);
+        expect(described).toContain('vlocity_cmt__Setting__mdt');
+        expect(described).toContain('vlocity_cmt__Pricing__e');
+        expect(described).toContain('ns__External__x');
+        expect(described).toContain('My_Big__b');
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
 });
