@@ -25,6 +25,16 @@ describe('normalizeSObjectApiName', () => {
         expect(normalizeSObjectApiName('ns__My_Thing__mdt')).toBe('ns__My_Thing__mdt');
     });
 
+    it('accepts a managed-package namespace containing an underscore', () => {
+        // Salesforce namespace prefixes may contain single underscores
+        // (e.g. Vlocity's `vlocity_cmt`); the describe gate must not reject them.
+        expect(normalizeSObjectApiName('vlocity_cmt__Order__c')).toBe('vlocity_cmt__Order__c');
+        expect(normalizeSObjectApiName('vlocity_cmt__OmniProcess__c')).toBe('vlocity_cmt__OmniProcess__c');
+        expect(normalizeSObjectApiName('vlocity_cmt__My_Thing__mdt')).toBe('vlocity_cmt__My_Thing__mdt');
+        // ...but the underscore-bearing namespace must still reject __r.
+        expect(normalizeSObjectApiName('vlocity_cmt__Account__r')).toBeUndefined();
+    });
+
     it('rejects the relationship suffix __r', () => {
         expect(normalizeSObjectApiName('Account__r')).toBeUndefined();
         expect(normalizeSObjectApiName('My_Custom__r')).toBeUndefined();
