@@ -697,7 +697,11 @@ export class MetadataProvider {
         // Use full getObjectList() (disk → CLI → SOQL_FALLBACK_OBJECTS) so a failed
         // `sf sobject list` does not collapse to zero candidates.
         const allObjects = await this.getObjectList();
-        const customObjects = allObjects.filter(n => n.endsWith('__c'));
+        // Include every custom-suffix object, not just __c: managed packages also ship
+        // __mdt (custom metadata types), __e (platform events), __x (external objects),
+        // and __b (big objects), all of which are SOQL-describable. A __c-only filter
+        // silently skipped them, so their fields never warmed the cache for autocomplete.
+        const customObjects = allObjects.filter(n => /__(c|mdt|e|x|b)$/.test(n));
         const candidates = [...new Set([...commonObjects, ...customObjects])].filter(n =>
             allObjects.includes(n)
         );
