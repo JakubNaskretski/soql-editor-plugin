@@ -115,14 +115,25 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                         // but re-validate here so the server never trusts the message.
                         const rawId = typeof msg.recordId === 'string' ? msg.recordId : '';
                         const validId = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(rawId);
-                        const org = this.sfCli.getCurrentOrg();
-                        if (validId && org?.instanceUrl) {
-                            const url = `${org.instanceUrl.replace(/\/$/, '')}/${rawId}`;
-                            await vscode.env.openExternal(vscode.Uri.parse(url));
-                        } else if (!validId) {
+                        if (!validId) {
                             this.outputChannel.appendLine(
                                 `openRecord rejected: invalid record id "${rawId}"`
                             );
+                            break;
+                        }
+                        const org = this.sfCli.getCurrentOrg();
+                        if (!org) {
+                            this.postMessage({ type: 'error', message: 'Select an org first to open records' });
+                            break;
+                        }
+                        // Prefer the CLI's authenticated session (frontdoor) so the
+                        // record opens even when the browser has no Salesforce login.
+                        // Fall back to the bare instance URL (lands on the login page,
+                        // which then redirects to the record once the user signs in).
+                        const opened = await this.sfCli.openRecord(rawId);
+                        if (!opened && org.instanceUrl) {
+                            const url = `${org.instanceUrl.replace(/\/$/, '')}/${rawId}`;
+                            await vscode.env.openExternal(vscode.Uri.parse(url));
                         }
                         break;
                     }
