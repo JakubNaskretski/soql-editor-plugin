@@ -4,10 +4,6 @@
   "description": "SOQL editor for Salesforce with smart autocomplete, validation, and multi-org query execution",
   "version": "0.6.9",
   "publisher": "Skrety",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/JakubNaskretski/soql-editor-plugin.git"
-  },
   "icon": "plugin-icon.png",
   "keywords": [
     "salesforce",
@@ -164,7 +160,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "package:dev": "node ./scripts/package-vsix.mjs dev",
-    "package:store": "node ./scripts/package-vsix.mjs store"
+    "package:store": "node ./scripts/package-vsix.mjs store",
+    "package": "node ./scripts/package-vsix.mjs store"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
