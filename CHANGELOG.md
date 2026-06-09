@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.10
+
+- Managed-package support: namespaced object and field names that contain an
+  underscore now resolve correctly for autocomplete, validation, and describe.
+- Custom metadata types and platform objects (`__mdt`, `__e`, `__x`, `__b`) are
+  now picked up by metadata sync, not just standard and `__c` objects.
+- "Open record" now uses the CLI front door, so it works even without an active
+  browser session.
+
 ## 0.6.9
 
 - Add repository link to the marketplace listing (no functional changes).
