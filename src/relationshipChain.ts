@@ -32,9 +32,11 @@ export async function resolveRelationshipChain(
     rootObject: string,
     relChain: readonly string[],
     metadata: MetadataProvider,
+    isCancelled?: () => boolean,
 ): Promise<SObjectDescribe | undefined> {
     let currentObj: string | undefined = rootObject;
     for (const relName of relChain) {
+        if (isCancelled?.()) { return undefined; }
         const desc = await metadata.describeSObject(currentObj);
         if (!desc) { return undefined; }
         const field = desc.fields.find(

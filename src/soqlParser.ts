@@ -720,10 +720,31 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     // Missing comma between SELECT fields — e.g. "SELECT Id Name FROM Account"
     // Heuristic: a "field" slot that's actually two bare identifiers separated by
     // whitespace, and isn't a function call / subquery / aggregate / TYPEOF.
-    // In aggregate queries (top-level GROUP BY present) a slot like
-    // "StageName s" is a legal field alias, so two-token slots are not flagged.
+    // In aggregate queries a slot like "StageName s" is a legal field alias —
+    // but only for GROUPED fields (aliasing a non-grouped bare field is invalid
+    // SOQL regardless), so a two-token slot is exempt only when its first token
+    // appears in the top-level GROUP BY list. This keeps "SELECT Id Name, ..."
+    // flagged even when the query has a GROUP BY.
     if (selectClause !== null && selectClause.trim().length > 0) {
-        const isAggregateQuery = findKeywordHits(text, 'GROUP BY').some(h => h.depth === 0);
+        const groupByHits = findKeywordHits(text, 'GROUP BY').filter(h => h.depth === 0);
+        const groupedFieldHeads = new Set<string>();
+        if (groupByHits.length > 0) {
+            const start = groupByHits[0].index + groupByHits[0].length;
+            let end = text.length;
+            for (const phrase of ['HAVING', 'ORDER BY', 'LIMIT', 'OFFSET', 'FOR']) {
+                for (const hit of findKeywordHits(text, phrase)) {
+                    if (hit.depth === 0 && hit.index > start) {
+                        end = Math.min(end, hit.index);
+                    }
+                }
+            }
+            const ids = text.slice(start, end).match(/[A-Za-z_][A-Za-z0-9_.]*/g) || [];
+            for (const id of ids) {
+                if (!/^(ROLLUP|CUBE|GROUPING)$/i.test(id)) {
+                    groupedFieldHeads.add(id.toLowerCase());
+                }
+            }
+        }
         for (const slot of splitTopLevelCsvWithOffsets(selectClause)) {
             const field = slot.value.trim();
             if (!field) { continue; }
@@ -731,7 +752,9 @@ export function validateSoqlStructure(text: string): SoqlError[] {
             if (/[(){}]/.test(field)) { continue; }                        // function/aggregate
             if (/^TYPEOF\b/i.test(field)) { continue; }                    // polymorphic TYPEOF ... END
             const idTokens = field.match(/[A-Za-z_][A-Za-z0-9_.]*/g) || [];
-            if (isAggregateQuery && idTokens.length === 2) { continue; }   // aggregate alias
+            if (idTokens.length === 2 && groupedFieldHeads.has(idTokens[0].toLowerCase())) {
+                continue;                                                  // alias on a grouped field
+            }
             if (idTokens.length >= 2 && !/[(),]/.test(field)) {
                 // slot.start points at the first non-whitespace char of the slot.
                 pushErrorAt(

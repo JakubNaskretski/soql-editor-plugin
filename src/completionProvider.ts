@@ -258,7 +258,12 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         token?: vscode.CancellationToken
     ): Promise<vscode.CompletionItem[]> {
         const dotParts = partial.split('.');
-        const resolved = await resolveRelationshipChain(objectName, dotParts.slice(0, -1), this.metadata);
+        const resolved = await resolveRelationshipChain(
+            objectName,
+            dotParts.slice(0, -1),
+            this.metadata,
+            () => token?.isCancellationRequested === true
+        );
         if (!resolved || token?.isCancellationRequested) { return []; }
 
         const fieldPartial = dotParts[dotParts.length - 1];
