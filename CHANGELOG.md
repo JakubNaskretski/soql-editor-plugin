@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0
+
+- Namespaced system objects now work end to end: share, history, feed, and
+  knowledge tables of managed-package objects (`ns__Obj__Share`,
+  `ns__Obj__History`, ...) and Data Cloud model objects (`ssot__*__dlm`) can be
+  described, cached by sync, and provide field suggestions. Previously they
+  showed up after `FROM` but never suggested any fields.
+- Editor autocomplete reaches parity with the sidebar:
+  - relationship paths complete across dots
+    (`Account.Owner.Na` → fields of the related object)
+  - a subquery's `FROM` suggests the parent's child relationship names instead
+    of object names
+- Polymorphic lookups (`Owner.`, `What.`, `Who.`) resolve to the most useful
+  target object — `Owner.` now suggests User fields instead of Group fields.
+- Smarter clause suggestions: fields that can't be filtered, sorted, or grouped
+  are hidden in `WHERE` / `ORDER BY` / `GROUP BY` (most noticeable on external
+  `__x` and big `__b` objects). Applies as object metadata is re-synced.
+- All custom-suffix objects (`__mdt`, `__e`, `__x`, `__b`, `__dlm`) now rank as
+  high as `__c` objects in object suggestions.
+- Validation fixes: field aliases in aggregate queries are no longer flagged as
+  missing commas, and typing in `HAVING` after a `GROUP BY` now gets the right
+  suggestions.
+
 ## 0.6.10
 
 - Managed-package support: namespaced object and field names that contain an
