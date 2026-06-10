@@ -57,6 +57,22 @@ describe('panel getSuggestions — object-type coverage', () => {
         expect(labels).not.toContain('Notes');
     });
 
+    it('suggests groupable:false fields in HAVING (valid inside aggregates)', async () => {
+        const metadata = makeMetadata({
+            opportunity: {
+                name: 'Opportunity',
+                fields: [
+                    { name: 'Amount', label: 'Amount', type: 'currency', nillable: true, referenceTo: [], relationshipName: null, picklistValues: [], groupable: false },
+                ],
+                childRelationships: [],
+            },
+        });
+
+        const text = 'SELECT StageName FROM Opportunity GROUP BY StageName HAVING Amo';
+        const suggestions = await getSuggestions(text, text.length, metadata);
+        expect(suggestions.map(s => s.label)).toContain('Amount');
+    });
+
     it('keeps capability-flagged fields in SELECT (flags only gate clause usage)', async () => {
         const metadata = makeMetadata({
             account: {

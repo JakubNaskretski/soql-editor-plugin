@@ -385,7 +385,10 @@ export async function getSuggestions(
             const obj = extractFromObject(text);
             const ctxObj = contextObject || obj;
             if (ctxObj && ctx.partial.length >= 1) {
-                const fieldSugs = await getDirectFieldSuggestions(ctxObj, ctx.partial, metadata, 'group_by');
+                // No capability filter: HAVING operates on aggregate results, and
+                // a field can be valid INSIDE an aggregate (HAVING SUM(Amount))
+                // while being groupable=false itself.
+                const fieldSugs = await getDirectFieldSuggestions(ctxObj, ctx.partial, metadata, 'select');
                 suggestions = [...suggestions, ...fieldSugs];
             }
             break;

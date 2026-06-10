@@ -738,11 +738,16 @@ export function validateSoqlStructure(text: string): SoqlError[] {
                     }
                 }
             }
-            const ids = text.slice(start, end).match(/[A-Za-z_][A-Za-z0-9_.]*/g) || [];
-            for (const id of ids) {
-                if (!/^(ROLLUP|CUBE|GROUPING)$/i.test(id)) {
-                    groupedFieldHeads.add(id.toLowerCase());
-                }
+            // Harvest identifiers, skipping function NAMES (token followed by an
+            // open paren, e.g. CALENDAR_YEAR in `GROUP BY CALENDAR_YEAR(CloseDate)`)
+            // so they can't accidentally legitimize a SELECT slot as an alias.
+            const groupByText = text.slice(start, end);
+            const idRe = /[A-Za-z_][A-Za-z0-9_.]*/g;
+            let idMatch: RegExpExecArray | null;
+            while ((idMatch = idRe.exec(groupByText)) !== null) {
+                const after = groupByText.slice(idMatch.index + idMatch[0].length).match(/^\s*(\S)?/);
+                if (after && after[1] === '(') { continue; }
+                groupedFieldHeads.add(idMatch[0].toLowerCase());
             }
         }
         for (const slot of splitTopLevelCsvWithOffsets(selectClause)) {

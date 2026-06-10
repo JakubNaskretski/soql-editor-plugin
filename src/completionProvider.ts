@@ -408,8 +408,10 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         items.push(...this.getOperatorCompletions(partial));
         items.push(...this.getKeywordItems(this.filterByPartial([...SOQL_BOOLEAN_LITERALS], partial), vscode.CompletionItemKind.Value));
 
-        // Also suggest grouped fields (HAVING can only reference groupable fields)
-        const fieldItems = await this.getFieldCompletions(queryText, offset, partial, 'group_by', token);
+        // Also suggest fields, unfiltered: HAVING operates on aggregate results,
+        // and a field can be valid INSIDE an aggregate (HAVING SUM(Amount)) while
+        // being groupable=false itself.
+        const fieldItems = await this.getFieldCompletions(queryText, offset, partial, 'select', token);
         items.push(...fieldItems);
 
         return items.slice(0, 60).map((item, i) => {
