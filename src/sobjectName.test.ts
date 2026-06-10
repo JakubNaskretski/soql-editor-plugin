@@ -35,6 +35,28 @@ describe('normalizeSObjectApiName', () => {
         expect(normalizeSObjectApiName('vlocity_cmt__Account__r')).toBeUndefined();
     });
 
+    it('accepts system suffixes without a namespace', () => {
+        for (const name of [
+            'MyObj__Share', 'MyObj__History', 'MyObj__Feed', 'MyObj__Tag',
+            'Knowledge__kav', 'MyModel__dlm', 'MyObj__hd',
+        ]) {
+            expect(normalizeSObjectApiName(name)).toBe(name);
+        }
+    });
+
+    it('accepts namespaced system-suffix objects (namespace + body + suffix)', () => {
+        // A suffix whitelist used to parse these as a double namespace and
+        // reject them, so e.g. a managed package's __Share/__History tables and
+        // every Data Cloud DMO (ssot namespace) could never be described.
+        for (const name of [
+            'ns__MyObj__Share', 'ns__MyObj__History', 'ns__MyObj__Feed',
+            'ns__Article__kav', 'ssot__Individual__dlm', 'ns__MyObj__hd',
+            'vlocity_cmt__OrderItem__Share', 'vlocity_cmt__OrderItem__History',
+        ]) {
+            expect(normalizeSObjectApiName(name)).toBe(name);
+        }
+    });
+
     it('rejects the relationship suffix __r', () => {
         expect(normalizeSObjectApiName('Account__r')).toBeUndefined();
         expect(normalizeSObjectApiName('My_Custom__r')).toBeUndefined();

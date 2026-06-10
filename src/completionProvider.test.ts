@@ -140,4 +140,91 @@ describe('SoqlCompletionProvider', () => {
         expect(accountIdIdx).toBeGreaterThanOrEqual(0);
         expect(accountRelIdx).toBe(accountIdIdx + 1);
     });
+
+    it('completes fields of the target object after a relationship dot', async () => {
+        // `SELECT Account.Na` on Contact must resolve the Account hop and offer
+        // Account's Name — previously the dotted partial matched nothing.
+        const text = 'SELECT Account.Na FROM Contact';
+        const document = { getText: () => text, offsetAt: () => 17 } as any;
+        const items = await provider.provideCompletionItems(document, {} as any, {} as any, {} as any);
+        const named = items.find((i: any) => i.label === 'Name');
+        expect(named).toBeDefined();
+        // Only the segment after the dot is inserted (VS Code's word range
+        // never spans the dot).
+        expect(named!.insertText).toBe('Name');
+    });
+
+    it('suggests child relationship names (not SObject names) in a subquery FROM', async () => {
+        metadata.describeSObject = vi.fn(async () => ({
+            name: 'Account',
+            fields: [],
+            childRelationships: [
+                { childSObject: 'Contact', field: 'AccountId', relationshipName: 'Contacts' },
+            ],
+        }));
+        provider = new SoqlCompletionProvider(metadata);
+        const text = 'SELECT Id, (SELECT Id FROM Con) FROM Account';
+        const document = { getText: () => text, offsetAt: () => 30 } as any;
+        const items = await provider.provideCompletionItems(document, {} as any, {} as any, {} as any);
+        const labels = items.map((i: any) => i.label);
+        expect(labels).toContain('Contacts');
+    });
+
+    it('prefers User over Group when traversing a polymorphic Owner lookup', async () => {
+        metadata.describeSObject = vi.fn(async (name: string) => {
+            const key = name.toLowerCase();
+            if (key === 'user') {
+                return {
+                    name: 'User',
+                    fields: [
+                        { name: 'UserType', label: 'User Type', type: 'picklist', nillable: true, referenceTo: [], relationshipName: undefined, picklistValues: [{ label: 'Standard', value: 'Standard' }] },
+                    ],
+                    childRelationships: [],
+                };
+            }
+            if (key === 'group') {
+                return { name: 'Group', fields: [], childRelationships: [] };
+            }
+            return {
+                name: 'Case',
+                fields: [
+                    { name: 'OwnerId', label: 'Owner ID', type: 'reference', nillable: false, referenceTo: ['Group', 'User'], relationshipName: 'Owner', picklistValues: [] },
+                ],
+                childRelationships: [],
+            };
+        });
+        provider = new SoqlCompletionProvider(metadata);
+        const text = 'SELECT Id FROM Case WHERE Owner.UserType = ';
+        const document = { getText: () => text, offsetAt: () => text.length } as any;
+        const items = await provider.provideCompletionItems(document, {} as any, {} as any, {} as any);
+        const labels = items.map((i: any) => i.label);
+        // referenceTo is [Group, User]; picking referenceTo[0] would resolve
+        // Group (no UserType) and the picklist value would be missing.
+        expect(labels).toContain('Standard');
+    });
+
+    it('hides non-filterable fields in WHERE but keeps them in SELECT', async () => {
+        metadata.describeSObject = vi.fn(async () => ({
+            name: 'Account',
+            fields: [
+                { name: 'Description', label: 'Description', type: 'textarea', nillable: true, referenceTo: [], relationshipName: undefined, picklistValues: [], filterable: false },
+                { name: 'DescCode', label: 'Desc Code', type: 'string', nillable: true, referenceTo: [], relationshipName: undefined, picklistValues: [] },
+            ],
+            childRelationships: [],
+        }));
+        provider = new SoqlCompletionProvider(metadata);
+
+        const whereText = 'SELECT Id FROM Account WHERE Desc';
+        const whereDoc = { getText: () => whereText, offsetAt: () => whereText.length } as any;
+        const whereItems = await provider.provideCompletionItems(whereDoc, {} as any, {} as any, {} as any);
+        const whereLabels = whereItems.map((i: any) => i.label);
+        expect(whereLabels).toContain('DescCode');
+        expect(whereLabels).not.toContain('Description');
+
+        const selectText = 'SELECT Desc FROM Account';
+        const selectDoc = { getText: () => selectText, offsetAt: () => 11 } as any;
+        const selectItems = await provider.provideCompletionItems(selectDoc, {} as any, {} as any, {} as any);
+        const selectLabels = selectItems.map((i: any) => i.label);
+        expect(selectLabels).toContain('Description');
+    });
 });

@@ -138,6 +138,31 @@ export const SOQL_ALL_KEYWORDS: readonly string[] = [
     ...SOQL_DATE_LITERALS,
 ];
 
+/** Clause a field suggestion is being offered for. */
+export type FieldUsage = 'select' | 'where' | 'order_by' | 'group_by';
+
+/**
+ * Whether a field may be offered for the given clause, based on the describe
+ * capability flags. Flags are optional (older disk caches and the local-project
+ * fallback don't carry them), so only an explicit `false` excludes a field —
+ * unknown means "allow", never "hide".
+ *
+ * This matters most for external (__x) and big (__b) objects, where many
+ * columns are not filterable/sortable and suggesting them produces queries
+ * that fail at runtime.
+ */
+export function isFieldUsableIn(
+    field: { filterable?: boolean; sortable?: boolean; groupable?: boolean },
+    usage: FieldUsage
+): boolean {
+    switch (usage) {
+        case 'where': return field.filterable !== false;
+        case 'order_by': return field.sortable !== false;
+        case 'group_by': return field.groupable !== false;
+        default: return true;
+    }
+}
+
 export function rankByPartial<T>(
     values: readonly T[],
     toText: (value: T) => string,

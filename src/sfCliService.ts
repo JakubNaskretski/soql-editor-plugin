@@ -105,6 +105,12 @@ export interface SObjectField {
     nillable: boolean;
     updateable: boolean;
     createable: boolean;
+    // Capability flags used to filter clause suggestions (WHERE needs
+    // filterable, ORDER BY sortable, GROUP BY groupable). Optional because
+    // older disk caches and the local-project fallback don't carry them.
+    filterable?: boolean;
+    sortable?: boolean;
+    groupable?: boolean;
 }
 
 export interface SObjectDescribe {
@@ -221,9 +227,18 @@ export class SfCliService {
         try {
             const result = await this.runCliAsync(['sobject', 'list', '--json', ...targetOrgArgs]);
             const parsed = JSON.parse(result);
-            this.objectListCache = parsed.result || [];
+            // Defensive: a malformed CLI envelope (result missing or not an
+            // array) must not poison the cache with a non-array — callers
+            // iterate this value on every keystroke.
+            const raw = parsed?.result;
+            if (!Array.isArray(raw)) {
+                this.lastObjectListError = 'sf sobject list returned an unexpected payload shape';
+                this.log('warn', this.lastObjectListError);
+                return [];
+            }
+            this.objectListCache = raw.filter((n): n is string => typeof n === 'string');
             this.lastObjectListError = undefined;
-            return this.objectListCache!;
+            return this.objectListCache;
         } catch (err: any) {
             this.lastObjectListError = err?.message || 'sf sobject list failed';
             this.log('error', `Failed to list objects: ${this.lastObjectListError}`);
@@ -490,6 +505,9 @@ export class SfCliService {
                 nillable: f.nillable,
                 updateable: f.updateable,
                 createable: f.createable,
+                filterable: typeof f.filterable === 'boolean' ? f.filterable : undefined,
+                sortable: typeof f.sortable === 'boolean' ? f.sortable : undefined,
+                groupable: typeof f.groupable === 'boolean' ? f.groupable : undefined,
             })),
             childRelationships: (r.childRelationships || [])
                 .filter((c: any) => c.relationshipName)

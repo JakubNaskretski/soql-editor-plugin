@@ -89,14 +89,16 @@ export function getQueryContext(text: string, offset: number): QueryContext {
         return { type: 'order_by', partial };
     }
 
+    // Check HAVING clause — suggest aggregate functions and fields.
+    // Must run BEFORE the GROUP BY check: `GROUP BY X HAVING Amo▌` matches the
+    // greedy GROUP BY pattern too, but the cursor is in the HAVING clause.
+    if (/HAVING\s+[^)]*$/i.test(before)) {
+        return { type: 'having', partial };
+    }
+
     // Check GROUP BY
     if (/GROUP\s+BY\s+[^)]*$/i.test(before)) {
         return { type: 'group_by', partial };
-    }
-
-    // Check HAVING clause — suggest aggregate functions and fields
-    if (/HAVING\s+[^)]*$/i.test(before)) {
-        return { type: 'having', partial };
     }
 
     // Check WHERE clause — are we after an operator (typing a value)?
@@ -720,7 +722,36 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     // Missing comma between SELECT fields — e.g. "SELECT Id Name FROM Account"
     // Heuristic: a "field" slot that's actually two bare identifiers separated by
     // whitespace, and isn't a function call / subquery / aggregate / TYPEOF.
+    // In aggregate queries a slot like "StageName s" is a legal field alias —
+    // but only for GROUPED fields (aliasing a non-grouped bare field is invalid
+    // SOQL regardless), so a two-token slot is exempt only when its first token
+    // appears in the top-level GROUP BY list. This keeps "SELECT Id Name, ..."
+    // flagged even when the query has a GROUP BY.
     if (selectClause !== null && selectClause.trim().length > 0) {
+        const groupByHits = findKeywordHits(text, 'GROUP BY').filter(h => h.depth === 0);
+        const groupedFieldHeads = new Set<string>();
+        if (groupByHits.length > 0) {
+            const start = groupByHits[0].index + groupByHits[0].length;
+            let end = text.length;
+            for (const phrase of ['HAVING', 'ORDER BY', 'LIMIT', 'OFFSET', 'FOR']) {
+                for (const hit of findKeywordHits(text, phrase)) {
+                    if (hit.depth === 0 && hit.index > start) {
+                        end = Math.min(end, hit.index);
+                    }
+                }
+            }
+            // Harvest identifiers, skipping function NAMES (token followed by an
+            // open paren, e.g. CALENDAR_YEAR in `GROUP BY CALENDAR_YEAR(CloseDate)`)
+            // so they can't accidentally legitimize a SELECT slot as an alias.
+            const groupByText = text.slice(start, end);
+            const idRe = /[A-Za-z_][A-Za-z0-9_.]*/g;
+            let idMatch: RegExpExecArray | null;
+            while ((idMatch = idRe.exec(groupByText)) !== null) {
+                const after = groupByText.slice(idMatch.index + idMatch[0].length).match(/^\s*(\S)?/);
+                if (after && after[1] === '(') { continue; }
+                groupedFieldHeads.add(idMatch[0].toLowerCase());
+            }
+        }
         for (const slot of splitTopLevelCsvWithOffsets(selectClause)) {
             const field = slot.value.trim();
             if (!field) { continue; }
@@ -728,6 +759,9 @@ export function validateSoqlStructure(text: string): SoqlError[] {
             if (/[(){}]/.test(field)) { continue; }                        // function/aggregate
             if (/^TYPEOF\b/i.test(field)) { continue; }                    // polymorphic TYPEOF ... END
             const idTokens = field.match(/[A-Za-z_][A-Za-z0-9_.]*/g) || [];
+            if (idTokens.length === 2 && groupedFieldHeads.has(idTokens[0].toLowerCase())) {
+                continue;                                                  // alias on a grouped field
+            }
             if (idTokens.length >= 2 && !/[(),]/.test(field)) {
                 // slot.start points at the first non-whitespace char of the slot.
                 pushErrorAt(

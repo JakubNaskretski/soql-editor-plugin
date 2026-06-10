@@ -168,6 +168,39 @@ describe('validateSoqlStructure', () => {
         expect(errs).toEqual([]);
     });
 
+    it('does not flag field aliases in aggregate queries as missing commas', () => {
+        // "StageName s" is a legal alias when the query has a top-level GROUP BY.
+        const errs = messages(
+            'SELECT StageName s, COUNT(Id) c FROM Opportunity GROUP BY StageName'
+        );
+        expect(errs.some(m => m.startsWith('Missing comma between SELECT fields'))).toBe(false);
+    });
+
+    it('still flags three-token slots in aggregate queries', () => {
+        const errs = messages(
+            'SELECT StageName s Amount, COUNT(Id) FROM Opportunity GROUP BY StageName'
+        );
+        expect(errs.some(m => m.startsWith('Missing comma between SELECT fields'))).toBe(true);
+    });
+
+    it('does not treat GROUP BY function names as grouped field heads', () => {
+        // CALENDAR_YEAR is a function NAME, not a grouped field — a SELECT slot
+        // starting with it must still be flagged as a missing comma.
+        const errs = messages(
+            'SELECT CALENDAR_YEAR Name, COUNT(Id) FROM Opportunity GROUP BY CALENDAR_YEAR(CloseDate)'
+        );
+        expect(errs.some(m => m.startsWith('Missing comma between SELECT fields'))).toBe(true);
+    });
+
+    it('still flags a genuine missing comma in an aggregate query (non-grouped head)', () => {
+        // "Id Name" is not an alias — Id is not in the GROUP BY list, so an
+        // aggregate query must not exempt it from the missing-comma check.
+        const errs = messages(
+            'SELECT Id Name, COUNT(Id) FROM Account GROUP BY StageName'
+        );
+        expect(errs.some(m => m.startsWith('Missing comma between SELECT fields'))).toBe(true);
+    });
+
     it('detects aliased duplicates (SELECT Id, Id alias FROM ...)', () => {
         const errs = messages('SELECT Id, Id alias FROM Account');
         expect(errs.some(m => m.startsWith('Duplicate field: Id'))).toBe(true);

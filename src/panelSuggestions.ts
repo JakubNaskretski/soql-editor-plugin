@@ -1,7 +1,8 @@
 /** Computes context-aware autocomplete suggestions for the sidebar editor. */
 import { MetadataProvider } from './metadataProvider';
-import { SObjectDescribe } from './sfCliService';
 import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset, ScopedFromInfo } from './soqlParser';
+import { resolveRelationshipChain } from './relationshipChain';
+import { FieldUsage, isFieldUsableIn } from './soqlCatalog';
 
 export interface Suggestion {
     label: string;
@@ -170,15 +171,21 @@ for (const [weight, names] of WEIGHTED_GROUPS) {
 }
 
 
-/** Custom objects (__c) should rank above Service/Field Service tier objects */
+/** Custom objects should rank above Service/Field Service tier objects.
+ *  Applies to every queryable custom suffix, not just __c — a packaged
+ *  external object (__x) or metadata type (__mdt) is as deliberate a target
+ *  as a __c when the user types its prefix. */
 const CUSTOM_OBJECT_WEIGHT = 85;
+const CUSTOM_SUFFIX_RE = /__(c|mdt|e|x|b|dlm)$/;
 
 function getObjectWeight(name: string): number {
-    return OBJECT_WEIGHTS[name] ?? (name.endsWith('__c') ? CUSTOM_OBJECT_WEIGHT : 0);
+    return OBJECT_WEIGHTS[name] ?? (CUSTOM_SUFFIX_RE.test(name) ? CUSTOM_OBJECT_WEIGHT : 0);
 }
 
 function stripManagedNamespace(segment: string): string {
-    return segment.replace(/^[A-Za-z0-9]+__([A-Za-z0-9_]+__(?:r|c))$/i, '$1');
+    // The namespace token permits single inner underscores (vlocity_cmt) just
+    // like the describe-gate regex in sobjectName.ts.
+    return segment.replace(/^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*__([A-Za-z0-9_]+__(?:r|c))$/i, '$1');
 }
 
 function truncateMiddle(value: string, maxLen: number): string {
@@ -290,11 +297,16 @@ export async function getSuggestions(
             if (ctx.partial.length < 1) { break; }
             const obj = contextObject;
             if (obj) {
+                const usage: FieldUsage =
+                    ctx.type === 'where_field' ? 'where'
+                        : ctx.type === 'order_by' ? 'order_by'
+                            : ctx.type === 'group_by' ? 'group_by'
+                                : 'select';
                 const dotParts = ctx.partial.split('.');
                 if (dotParts.length > 1) {
-                    suggestions = await getRelationshipFieldSuggestions(obj, dotParts, metadata);
+                    suggestions = await getRelationshipFieldSuggestions(obj, dotParts, metadata, usage);
                 } else {
-                    suggestions = await getDirectFieldSuggestions(obj, ctx.partial, metadata);
+                    suggestions = await getDirectFieldSuggestions(obj, ctx.partial, metadata, usage);
                 }
                 const isFinishedToken = wordAtCursor.word.length > 0 && wordAtCursor.end === offset;
                 if (isFinishedToken) {
@@ -310,13 +322,7 @@ export async function getSuggestions(
                 // Account.Industry on Contact) to the target object's field so its
                 // picklist values are offered, not the base object's.
                 const segments = ctx.field.split('.');
-                let current: string | undefined = obj;
-                for (let i = 0; i < segments.length - 1 && current; i++) {
-                    const d = await metadata.describeSObject(current);
-                    const rel = d?.fields.find(f => f.relationshipName?.toLowerCase() === segments[i].toLowerCase());
-                    current = rel && rel.referenceTo.length > 0 ? rel.referenceTo[0] : undefined;
-                }
-                const desc = current ? await metadata.describeSObject(current) : undefined;
+                const desc = await resolveRelationshipChain(obj, segments.slice(0, -1), metadata);
                 if (desc) {
                     const leaf = segments[segments.length - 1].toLowerCase();
                     const field = desc.fields.find(f => f.name.toLowerCase() === leaf);
@@ -379,7 +385,10 @@ export async function getSuggestions(
             const obj = extractFromObject(text);
             const ctxObj = contextObject || obj;
             if (ctxObj && ctx.partial.length >= 1) {
-                const fieldSugs = await getDirectFieldSuggestions(ctxObj, ctx.partial, metadata);
+                // No capability filter: HAVING operates on aggregate results, and
+                // a field can be valid INSIDE an aggregate (HAVING SUM(Amount))
+                // while being groupable=false itself.
+                const fieldSugs = await getDirectFieldSuggestions(ctxObj, ctx.partial, metadata, 'select');
                 suggestions = [...suggestions, ...fieldSugs];
             }
             break;
@@ -394,7 +403,7 @@ export async function getSuggestions(
     return suggestions;
 }
 
-async function getSubqueryFromSuggestions(
+export async function getSubqueryFromSuggestions(
     text: string,
     scoped: ScopedFromInfo,
     partial: string,
@@ -518,37 +527,21 @@ async function resolveScopeObject(
     return resolved;
 }
 
-async function resolveRelationshipChain(
-    rootObject: string,
-    relChain: string[],
-    metadata: MetadataProvider,
-): Promise<SObjectDescribe | undefined> {
-    let currentObj = rootObject;
-    for (const relName of relChain) {
-        const desc = await metadata.describeSObject(currentObj);
-        if (!desc) { return undefined; }
-        const field = desc.fields.find(
-            f => f.relationshipName && f.relationshipName.toLowerCase() === relName.toLowerCase()
-        );
-        if (!field || field.referenceTo.length === 0) { return undefined; }
-        currentObj = field.referenceTo[0];
-    }
-    return metadata.describeSObject(currentObj);
-}
-
 async function getRelationshipFieldSuggestions(
     obj: string,
     dotParts: string[],
     metadata: MetadataProvider,
+    usage: FieldUsage,
 ): Promise<Suggestion[]> {
     const resolved = await resolveRelationshipChain(obj, dotParts.slice(0, -1), metadata);
     if (!resolved) { return []; }
 
     const fieldPartial = dotParts[dotParts.length - 1].toLowerCase();
     const prefix = dotParts.slice(0, -1).join('.') + '.';
-    const starts = resolved.fields.filter(f => !fieldPartial || f.name.toLowerCase().startsWith(fieldPartial));
+    const usable = resolved.fields.filter(f => isFieldUsableIn(f, usage));
+    const starts = usable.filter(f => !fieldPartial || f.name.toLowerCase().startsWith(fieldPartial));
     const contains = fieldPartial
-        ? resolved.fields.filter(f => !f.name.toLowerCase().startsWith(fieldPartial) && f.name.toLowerCase().includes(fieldPartial))
+        ? usable.filter(f => !f.name.toLowerCase().startsWith(fieldPartial) && f.name.toLowerCase().includes(fieldPartial))
         : [];
 
     const suggestions: Suggestion[] = [...starts, ...contains]
@@ -582,14 +575,16 @@ async function getDirectFieldSuggestions(
     obj: string,
     partial: string,
     metadata: MetadataProvider,
+    usage: FieldUsage,
 ): Promise<Suggestion[]> {
     const desc = await metadata.describeSObject(obj);
     if (!desc) { return []; }
 
     const lower = partial.toLowerCase();
-    const starts = desc.fields.filter(f => !partial || f.name.toLowerCase().startsWith(lower));
+    const usable = desc.fields.filter(f => isFieldUsableIn(f, usage));
+    const starts = usable.filter(f => !partial || f.name.toLowerCase().startsWith(lower));
     const contains = partial
-        ? desc.fields.filter(f => !f.name.toLowerCase().startsWith(lower) && f.name.toLowerCase().includes(lower))
+        ? usable.filter(f => !f.name.toLowerCase().startsWith(lower) && f.name.toLowerCase().includes(lower))
         : [];
 
     const suggestions: Suggestion[] = [...starts, ...contains]
