@@ -89,14 +89,16 @@ export function getQueryContext(text: string, offset: number): QueryContext {
         return { type: 'order_by', partial };
     }
 
+    // Check HAVING clause — suggest aggregate functions and fields.
+    // Must run BEFORE the GROUP BY check: `GROUP BY X HAVING Amo▌` matches the
+    // greedy GROUP BY pattern too, but the cursor is in the HAVING clause.
+    if (/HAVING\s+[^)]*$/i.test(before)) {
+        return { type: 'having', partial };
+    }
+
     // Check GROUP BY
     if (/GROUP\s+BY\s+[^)]*$/i.test(before)) {
         return { type: 'group_by', partial };
-    }
-
-    // Check HAVING clause — suggest aggregate functions and fields
-    if (/HAVING\s+[^)]*$/i.test(before)) {
-        return { type: 'having', partial };
     }
 
     // Check WHERE clause — are we after an operator (typing a value)?
