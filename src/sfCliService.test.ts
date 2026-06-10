@@ -156,3 +156,35 @@ describe('SfCliService.openRecord', () => {
         expect(ok).toBe(false);
     });
 });
+
+describe('SfCliService.getObjectList', () => {
+    beforeEach(() => {
+        execFileMock.mockReset();
+    });
+
+    it('returns string names from a well-formed envelope', async () => {
+        execFileMock.mockImplementation((_file, _args, _opts, cb) =>
+            cb(null, JSON.stringify({ status: 0, result: ['Account', 'Contact'] }), '')
+        );
+        const svc = makeService();
+        await expect(svc.getObjectList()).resolves.toEqual(['Account', 'Contact']);
+        expect(svc.getLastObjectListError()).toBeUndefined();
+    });
+
+    it('rejects a malformed envelope shape instead of caching it', async () => {
+        execFileMock.mockImplementation((_file, _args, _opts, cb) =>
+            cb(null, JSON.stringify({ status: 0, result: { bogus: true } }), '')
+        );
+        const svc = makeService();
+        await expect(svc.getObjectList()).resolves.toEqual([]);
+        expect(svc.getLastObjectListError()).toContain('unexpected payload');
+    });
+
+    it('drops non-string entries from the object list', async () => {
+        execFileMock.mockImplementation((_file, _args, _opts, cb) =>
+            cb(null, JSON.stringify({ status: 0, result: ['Account', 42, null, 'Contact'] }), '')
+        );
+        const svc = makeService();
+        await expect(svc.getObjectList()).resolves.toEqual(['Account', 'Contact']);
+    });
+});

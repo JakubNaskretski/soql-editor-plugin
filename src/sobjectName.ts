@@ -1,17 +1,27 @@
 /**
  * Validates and normalizes SObject API names used across the extension.
  *
- * Accepts:
+ * Accepts (namespace? + body + suffix?, i.e. at most two `__` runs):
  *   - Standard names:           Account, MyCustomFoo, EntityDefinition
  *   - Underscore-segmented:     My_Custom_Thing, X_Y_Z
  *   - Custom suffix:            Foo__c, Bar__mdt, Baz__e, Qux__x, Quux__b
- *   - Namespaced + custom:      ns__Foo__c, ns__My_Thing__mdt
+ *   - System suffixes:          Foo__Share, Foo__History, Foo__Feed,
+ *                               Article__kav, Model__dlm, Foo__hd, ...
+ *   - Namespaced + suffix:      ns__Foo__c, ns__Foo__Share, ssot__Individual__dlm
  *   - Underscore in namespace:  vlocity_cmt__Order__c  (managed-package prefix)
  *
  * Rejects:
- *   - Relationship suffix:      Foo__r  (not a queryable SObject)
- *   - Multiple namespace runs:  ns1__ns2__Foo__c, Foo__Bar__Baz__c
+ *   - Relationship suffix:      Foo__r, ns__Foo__r  (not a queryable SObject)
+ *   - Three or more `__` runs:  ns1__ns2__Foo__c, Foo__Bar__Baz__c
  *   - Trailing/leading underscores, empty, double-underscore inside body
+ *
+ * The suffix is intentionally NOT a whitelist: Salesforce keeps adding system
+ * suffixes (__Share, __History, __Feed, __Tag, __kav, __ViewStat, __dlm, __hd,
+ * ...) and a whitelist silently breaks the namespaced variant of each one —
+ * `ns__Obj__Share` would parse as a double namespace and be rejected, so the
+ * object's fields would never be describable (the exact failure mode of the
+ * earlier vlocity_cmt bug, one level out). A name with a valid shape that
+ * doesn't exist in the org simply fails the describe with a clean CLI error.
  *
  * Path-traversal guarantee: only [A-Za-z0-9_] allowed — no '.', '/', '\\'.
  */
@@ -21,10 +31,10 @@
 //
 // The namespace token mirrors the body's `(?:_[A-Za-z0-9]+)*` so a managed-
 // package prefix that contains a single underscore (e.g. `vlocity_cmt`) is
-// accepted; `__` stays reserved as the namespace/suffix separator, so genuine
-// double-namespace runs (`ns1__ns2__Foo__c`) are still rejected.
+// accepted. The suffix token allows no inner underscore, so `__` stays
+// reserved as the separator and 3+ runs (`ns1__ns2__Foo__c`) still reject.
 const SOBJECT_API_NAME_RE =
-    /^(?!.*__r$)(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*__)?[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*(?:__(?:c|mdt|e|x|b))?$/;
+    /^(?!.*__r$)(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*__)?[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*(?:__[A-Za-z][A-Za-z0-9]*)?$/;
 
 export function normalizeSObjectApiName(name: string): string | undefined {
     const trimmed = name.trim();

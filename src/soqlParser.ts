@@ -720,7 +720,10 @@ export function validateSoqlStructure(text: string): SoqlError[] {
     // Missing comma between SELECT fields — e.g. "SELECT Id Name FROM Account"
     // Heuristic: a "field" slot that's actually two bare identifiers separated by
     // whitespace, and isn't a function call / subquery / aggregate / TYPEOF.
+    // In aggregate queries (top-level GROUP BY present) a slot like
+    // "StageName s" is a legal field alias, so two-token slots are not flagged.
     if (selectClause !== null && selectClause.trim().length > 0) {
+        const isAggregateQuery = findKeywordHits(text, 'GROUP BY').some(h => h.depth === 0);
         for (const slot of splitTopLevelCsvWithOffsets(selectClause)) {
             const field = slot.value.trim();
             if (!field) { continue; }
@@ -728,6 +731,7 @@ export function validateSoqlStructure(text: string): SoqlError[] {
             if (/[(){}]/.test(field)) { continue; }                        // function/aggregate
             if (/^TYPEOF\b/i.test(field)) { continue; }                    // polymorphic TYPEOF ... END
             const idTokens = field.match(/[A-Za-z_][A-Za-z0-9_.]*/g) || [];
+            if (isAggregateQuery && idTokens.length === 2) { continue; }   // aggregate alias
             if (idTokens.length >= 2 && !/[(),]/.test(field)) {
                 // slot.start points at the first non-whitespace char of the slot.
                 pushErrorAt(

@@ -1,7 +1,11 @@
 import * as vscode from 'vscode';
-import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset } from './soqlParser';
+import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset, ScopedFromInfo } from './soqlParser';
 import { MetadataProvider } from './metadataProvider';
+import { resolveRelationshipChain } from './relationshipChain';
+import { getSubqueryFromSuggestions } from './panelSuggestions';
 import {
+    FieldUsage,
+    isFieldUsableIn,
     SOQL_AGGREGATE_FUNCTIONS,
     SOQL_BOOLEAN_LITERALS,
     SOQL_CLAUSE_KEYWORDS,
@@ -31,7 +35,7 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
     async provideCompletionItems(
         document: vscode.TextDocument,
         position: vscode.Position,
-        _token: vscode.CancellationToken,
+        token: vscode.CancellationToken,
         _context: vscode.CompletionContext
     ): Promise<vscode.CompletionItem[]> {
         const text = document.getText();
@@ -39,14 +43,27 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         const ctx = getQueryContext(text, offset);
 
         switch (ctx.type) {
-            case 'from_object':
+            case 'from_object': {
+                // Inside a subquery, FROM takes a child RELATIONSHIP name
+                // (e.g. `Contacts`), not an SObject name — mirror the panel.
+                const scoped = extractScopedFromInfo(text, offset);
+                if (scoped && scoped.depth > 0) {
+                    return this.getChildRelationshipCompletions(text, scoped, ctx.partial);
+                }
                 return this.getObjectCompletions(ctx.partial);
+            }
 
             case 'select_fields':
             case 'where_field':
             case 'order_by':
-            case 'group_by':
-                return this.getFieldCompletions(text, offset, ctx.partial);
+            case 'group_by': {
+                const usage: FieldUsage =
+                    ctx.type === 'where_field' ? 'where'
+                        : ctx.type === 'order_by' ? 'order_by'
+                            : ctx.type === 'group_by' ? 'group_by'
+                                : 'select';
+                return this.getFieldCompletions(text, offset, ctx.partial, usage, token);
+            }
 
             case 'where_operator':
                 return this.getOperatorCompletions(ctx.partial);
@@ -55,7 +72,7 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
                 return this.getValueCompletions(text, offset, ctx.field);
 
             case 'having':
-                return this.getHavingCompletions(text, offset, ctx.partial);
+                return this.getHavingCompletions(text, offset, ctx.partial, token);
 
             case 'order_direction':
                 return this.getKeywordItems(this.filterByPartial(['ASC', 'DESC'], ctx.partial), vscode.CompletionItemKind.EnumMember);
@@ -107,19 +124,34 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         });
     }
 
-    private async getFieldCompletions(queryText: string, offset: number, partial: string): Promise<vscode.CompletionItem[]> {
+    private async getFieldCompletions(
+        queryText: string,
+        offset: number,
+        partial: string,
+        usage: FieldUsage = 'select',
+        token?: vscode.CancellationToken
+    ): Promise<vscode.CompletionItem[]> {
         const objectName = await this.resolveScopedObject(queryText, offset);
-        if (!objectName) {
+        if (!objectName || token?.isCancellationRequested) {
             return [];
         }
 
+        // Dotted partial (`Account.Owner.Na`) — resolve the relationship chain
+        // and complete fields of the TARGET object. Previously the dotted text
+        // was ranked against the base object's bare field names, so the editor
+        // offered `Owner.` and then went silent after the dot.
+        if (partial.includes('.')) {
+            return this.getRelationshipFieldCompletions(objectName, partial, usage, token);
+        }
+
         const describe = await this.metadata.describeSObject(objectName);
-        if (!describe) {
+        if (!describe || token?.isCancellationRequested) {
             return [];
         }
 
         const lower = partial.toLowerCase();
-        const matched = rankByPartial(describe.fields, field => field.name, partial, 25);
+        const usableFields = describe.fields.filter(f => isFieldUsableIn(f, usage));
+        const matched = rankByPartial(usableFields, field => field.name, partial, 25);
         const items: vscode.CompletionItem[] = [];
         const addedRelationshipNames = new Set<string>();
 
@@ -214,6 +246,79 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
     }
 
     /**
+     * Completions for a dotted relationship path (`Account.Owner.Na`). The last
+     * dot-segment is the field partial; everything before it is a relationship
+     * chain resolved hop-by-hop (shared with the sidebar engine). Inserted text
+     * is only the final segment — VS Code's word range never spans the dot.
+     */
+    private async getRelationshipFieldCompletions(
+        objectName: string,
+        partial: string,
+        usage: FieldUsage,
+        token?: vscode.CancellationToken
+    ): Promise<vscode.CompletionItem[]> {
+        const dotParts = partial.split('.');
+        const resolved = await resolveRelationshipChain(objectName, dotParts.slice(0, -1), this.metadata);
+        if (!resolved || token?.isCancellationRequested) { return []; }
+
+        const fieldPartial = dotParts[dotParts.length - 1];
+        const usableFields = resolved.fields.filter(f => isFieldUsableIn(f, usage));
+        const matched = rankByPartial(usableFields, f => f.name, fieldPartial, 25);
+
+        const items: vscode.CompletionItem[] = matched.map(field => {
+            const item = new vscode.CompletionItem(field.name, vscode.CompletionItemKind.Field);
+            item.detail = `${field.type}${field.nillable ? ' (nullable)' : ''} (${resolved.name})`;
+            item.insertText = field.name;
+            return item;
+        });
+
+        // Deeper traversal: offer the next relationship hop with a re-trigger.
+        const lowerFieldPartial = fieldPartial.toLowerCase();
+        const relFields = resolved.fields.filter(f =>
+            f.relationshipName && f.referenceTo.length > 0 &&
+            (!lowerFieldPartial ||
+                f.relationshipName.toLowerCase().startsWith(lowerFieldPartial) ||
+                f.relationshipName.toLowerCase().includes(lowerFieldPartial))
+        );
+        for (const field of relFields.slice(0, 5)) {
+            const relName = field.relationshipName!;
+            const item = new vscode.CompletionItem(relName + '.', vscode.CompletionItemKind.Reference);
+            item.detail = `Relationship > ${field.referenceTo.join(', ')}`;
+            item.insertText = relName + '.';
+            item.command = {
+                command: 'editor.action.triggerSuggest',
+                title: 'Trigger Suggest',
+            };
+            items.push(item);
+        }
+
+        return items.map((item, i) => {
+            item.sortText = String(i).padStart(4, '0');
+            return item;
+        });
+    }
+
+    /**
+     * Subquery FROM takes the parent's child relationship name, not an SObject
+     * name. Delegates to the engine shared with the sidebar so both surfaces
+     * suggest identical child relationships.
+     */
+    private async getChildRelationshipCompletions(
+        text: string,
+        scoped: ScopedFromInfo,
+        partial: string
+    ): Promise<vscode.CompletionItem[]> {
+        const suggestions = await getSubqueryFromSuggestions(text, scoped, partial, this.metadata);
+        return suggestions.map((s, i) => {
+            const item = new vscode.CompletionItem(s.label, vscode.CompletionItemKind.Reference);
+            item.detail = s.detail;
+            item.insertText = s.insertText;
+            item.sortText = String(i).padStart(4, '0');
+            return item;
+        });
+    }
+
+    /**
      * Resolve a (possibly dotted) WHERE field path to its field descriptor,
      * walking relationship segments to the target object — e.g. `Account.Industry`
      * on Contact resolves to Account's Industry field, so its picklist values can
@@ -221,16 +326,7 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
      */
     private async resolveFieldForValue(objectName: string, path: string) {
         const segments = path.split('.');
-        let currentObject = objectName;
-        for (let i = 0; i < segments.length - 1; i++) {
-            const d = await this.metadata.describeSObject(currentObject);
-            if (!d) { return undefined; }
-            const seg = segments[i].toLowerCase();
-            const relField = d.fields.find(f => f.relationshipName?.toLowerCase() === seg);
-            if (!relField || relField.referenceTo.length === 0) { return undefined; }
-            currentObject = relField.referenceTo[0];
-        }
-        const describe = await this.metadata.describeSObject(currentObject);
+        const describe = await resolveRelationshipChain(objectName, segments.slice(0, -1), this.metadata);
         if (!describe) { return undefined; }
         const leaf = segments[segments.length - 1].toLowerCase();
         return describe.fields.find(f => f.name.toLowerCase() === leaf);
@@ -295,15 +391,20 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         });
     }
 
-    private async getHavingCompletions(queryText: string, offset: number, partial: string): Promise<vscode.CompletionItem[]> {
+    private async getHavingCompletions(
+        queryText: string,
+        offset: number,
+        partial: string,
+        token?: vscode.CancellationToken
+    ): Promise<vscode.CompletionItem[]> {
         const items: vscode.CompletionItem[] = [];
         const filteredAggs = this.filterByPartial([...SOQL_AGGREGATE_FUNCTIONS], partial);
         items.push(...this.getKeywordItems(filteredAggs, vscode.CompletionItemKind.Function));
         items.push(...this.getOperatorCompletions(partial));
         items.push(...this.getKeywordItems(this.filterByPartial([...SOQL_BOOLEAN_LITERALS], partial), vscode.CompletionItemKind.Value));
 
-        // Also suggest grouped fields
-        const fieldItems = await this.getFieldCompletions(queryText, offset, partial);
+        // Also suggest grouped fields (HAVING can only reference groupable fields)
+        const fieldItems = await this.getFieldCompletions(queryText, offset, partial, 'group_by', token);
         items.push(...fieldItems);
 
         return items.slice(0, 60).map((item, i) => {
