@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- Add a branded extension icon — shown on the Marketplace listing and the activity-bar.
+
 ## 0.7.0
 
 - Namespaced system objects now work end to end: share, history, feed, and
