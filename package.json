@@ -2,7 +2,7 @@
   "name": "soql-editor",
   "displayName": "SOQL Editor",
   "description": "SOQL editor for Salesforce with smart autocomplete, validation, and multi-org query execution",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "keywords": [
@@ -36,7 +36,7 @@
         {
           "id": "soql-editor",
           "title": "SOQL Editor",
-          "icon": "$(database)"
+          "icon": "media/activitybar-icon.svg"
         }
       ]
     },
