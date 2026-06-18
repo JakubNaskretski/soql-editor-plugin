@@ -301,6 +301,34 @@ body {
     color: var(--vscode-descriptionForeground);
 }
 
+/* ── large-query confirm prompt ────────── */
+.confirm-prompt { padding: 12px; font-size: 12px; }
+.confirm-msg { margin-bottom: 10px; color: var(--vscode-foreground); }
+.confirm-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.confirm-btn {
+    background: none;
+    color: var(--vscode-textLink-foreground);
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 3px;
+    padding: 4px 10px; cursor: pointer;
+    font-size: 12px;
+}
+.confirm-btn:hover {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: var(--vscode-button-background);
+}
+.confirm-btn.confirm-primary {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: var(--vscode-button-background);
+}
+.confirm-btn.confirm-primary:hover {
+    background: var(--vscode-button-hoverBackground);
+    border-color: var(--vscode-button-hoverBackground);
+}
+.confirm-btn.confirm-cancel { color: var(--vscode-descriptionForeground); }
+
 /* ── console log ───────────────────────── */
 .console-wrapper {
     flex: 0 0 auto;

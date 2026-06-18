@@ -8,6 +8,9 @@ import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } fro
 import { flattenRecordForDisplay } from './resultFlattening';
 import { PANEL_LOCAL_RESOURCE_ROOT } from './webviewAssets';
 
+/** The user's answer to the in-panel large-query confirm prompt. */
+type LargeQueryChoice = 'limit200' | 'limit2000' | 'all' | 'cancel';
+
 /**
  * Sidebar webview: SOQL textarea with inline suggestions + run button + results table.
  */
@@ -20,6 +23,12 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
     private extensionUri: vscode.Uri;
     private logSubscription?: vscode.Disposable;
     private executing = false;
+    /** Aborts the in-flight CLI call (COUNT preflight or the query itself) when
+     *  the user cancels from the panel. */
+    private currentAbort?: AbortController;
+    /** Resolver for the in-panel "large query" confirm prompt. Set while the
+     *  webview is showing the prompt; cleared once a choice (or cancel) arrives. */
+    private pendingConfirm?: (choice: LargeQueryChoice) => void;
 
     /** Upper bound on rows shipped to the webview, to avoid cloning an unbounded
      *  result set across the postMessage boundary on a "Fetch all". */
@@ -84,6 +93,12 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                 switch (msg.type) {
                     case 'executeQuery':
                         await this.handleExecuteQuery(msg.query);
+                        break;
+                    case 'cancelQuery':
+                        this.handleCancelQuery();
+                        break;
+                    case 'largeQueryChoice':
+                        this.resolveLargeQueryChoice(msg.choice);
                         break;
                     case 'requestSuggestions': {
                         const items = await getSuggestions(msg.text, msg.offset, this.metadata);
@@ -237,12 +252,16 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         }
 
         // Re-entrancy guard: overlapping runs race on the results message — a slower
-        // earlier query could overwrite a later one (last-to-arrive wins).
+        // earlier query could overwrite a later one (last-to-arrive wins). While a
+        // run is in flight the webview's Run button becomes Cancel, so a second
+        // click cancels rather than re-entering here.
         if (this.executing) {
             this.postMessage({ type: 'info', message: 'A query is already running' });
             return;
         }
         this.executing = true;
+        const abort = new AbortController();
+        this.currentAbort = abort;
 
         // Notify UI immediately so users get instant feedback on Run/Cmd+Enter,
         // even while preflight checks are still running.
@@ -255,35 +274,47 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                 if (countQuery) {
                     this.postMessage({ type: 'log', level: 'cmd', message: 'Preparing COUNT() preflight query' });
                     try {
-                        const countResult = await this.sfCli.executeQuery(countQuery);
+                        const countResult = await this.sfCli.executeQuery(countQuery, false, abort.signal);
                         const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
                         const threshold = this.getSlowQueryWarningThreshold();
                         if (shouldPromptForCount(totalRows, threshold)) {
-                            const choice = await vscode.window.showWarningMessage(
-                                `Query matches ${totalRows} records. Run it?`,
-                                { modal: false },
-                                'Add LIMIT 200',
-                                'Add LIMIT 2000',
-                                `Fetch all ${totalRows}`
-                            );
-                            if (!choice) {
-                                // User dismissed the warning — clear the spinner that
-                                // queryStarted left in place; otherwise the panel stays
-                                // in "Running..." forever.
+                            // Ask IN the panel rather than via a VS Code toast: right
+                            // after an org switch the org's own notifications fill the
+                            // toast stack, so a non-modal warning slides unseen into the
+                            // notification center and the run wedges on "Running..." with
+                            // the LIMIT options the user never saw. The in-panel prompt
+                            // can't be buried, and Cancel is always one click away.
+                            const choice = await this.askLargeQueryChoice(totalRows);
+                            if (choice === 'cancel') {
                                 this.postMessage({ type: 'info', message: 'Query cancelled' });
                                 return;
                             }
-                            if (choice === 'Add LIMIT 200') {
+                            if (choice === 'limit200') {
                                 query = applyLimit(query, 200);
-                            } else if (choice === 'Add LIMIT 2000') {
+                            } else if (choice === 'limit2000') {
                                 query = applyLimit(query, 2000);
                             }
+                            // 'all' → run the query unbounded (the user opted in after
+                            // seeing the row count).
                         }
                     } catch (err: any) {
-                        // Surface (don't swallow) the preflight failure, then run anyway.
+                        if (abort.signal.aborted) {
+                            this.postMessage({ type: 'info', message: 'Query cancelled' });
+                            return;
+                        }
+                        // Surface (don't swallow) the preflight failure. Mirror it to
+                        // the panel console too — the catch previously logged only to
+                        // the output channel, so when the first post-switch CLI call
+                        // failed the user saw nothing explaining the missing prompt.
+                        const reason = err?.message ?? String(err);
                         this.outputChannel.appendLine(
-                            `COUNT preflight failed (running without a size estimate): ${err?.message ?? err}`
+                            `COUNT preflight failed (running without a size estimate): ${reason}`
                         );
+                        this.postMessage({
+                            type: 'log',
+                            level: 'warn',
+                            message: `COUNT preflight failed (running without a size estimate): ${reason}`,
+                        });
                     }
                 }
             }
@@ -292,7 +323,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
             // (and pollute the cache of) the new org with this query's fields.
             const orgAtStart = this.sfCli.getCurrentOrg()?.username;
 
-            const result = await this.sfCli.executeQuery(query);
+            const result = await this.sfCli.executeQuery(query, false, abort.signal);
             if (this.sfCli.getCurrentOrg()?.username === orgAtStart) {
                 await this.metadata.reconcileSuccessfulQuery(query);
             }
@@ -324,18 +355,57 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
 
             this.postMessage({ type: 'queryResults', columns, rows, rawRows: records, totalSize });
         } catch (err: any) {
-            this.outputChannel.appendLine(`Panel query error: ${err?.detail ?? err?.message ?? err}`);
-            this.postMessage({
-                type: 'error',
-                message: err?.message ?? 'Query failed',
-                detail: err?.detail,
-                code: err?.code,
-                line: err?.line,
-                column: err?.column,
-            });
+            if (abort.signal.aborted) {
+                // User cancelled — not an error. (The CLI rejects with a generic
+                // envelope on SIGTERM, so key off our own signal, not err shape.)
+                this.postMessage({ type: 'info', message: 'Query cancelled' });
+            } else {
+                this.outputChannel.appendLine(`Panel query error: ${err?.detail ?? err?.message ?? err}`);
+                this.postMessage({
+                    type: 'error',
+                    message: err?.message ?? 'Query failed',
+                    detail: err?.detail,
+                    code: err?.code,
+                    line: err?.line,
+                    column: err?.column,
+                });
+            }
         } finally {
             this.executing = false;
+            this.currentAbort = undefined;
+            this.pendingConfirm = undefined;
         }
+    }
+
+    /**
+     * Show the in-panel "large query" prompt and resolve once the webview reports
+     * the user's choice (or a cancel). The returned promise is settled by
+     * `resolveLargeQueryChoice` / `handleCancelQuery`.
+     */
+    private askLargeQueryChoice(totalRows: number | string): Promise<LargeQueryChoice> {
+        return new Promise<LargeQueryChoice>(resolve => {
+            this.pendingConfirm = resolve;
+            this.postMessage({ type: 'confirmLargeQuery', totalRows });
+        });
+    }
+
+    /** Settle a pending large-query prompt with the webview's choice. */
+    private resolveLargeQueryChoice(choice: unknown) {
+        const resolve = this.pendingConfirm;
+        if (!resolve) { return; }
+        this.pendingConfirm = undefined;
+        const valid: LargeQueryChoice =
+            choice === 'limit200' || choice === 'limit2000' || choice === 'all'
+                ? choice
+                : 'cancel';
+        resolve(valid);
+    }
+
+    /** Cancel from the panel: abort an in-flight CLI call and/or a pending prompt. */
+    private handleCancelQuery() {
+        this.currentAbort?.abort();
+        // If we're parked on the confirm prompt (no CLI call in flight), unblock it.
+        this.resolveLargeQueryChoice('cancel');
     }
 
 }
