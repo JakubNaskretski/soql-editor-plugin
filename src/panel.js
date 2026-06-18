@@ -40,6 +40,9 @@
     let lastRows = [];
     let lastRawRows = [];
     let currentOrgLabel = 'No Org';
+    // True while a run is in flight (preflight, confirm prompt, or the query
+    // itself). Drives the Run⇄Cancel toggle so a run can always be cancelled.
+    let isRunning = false;
 
     // ── multi-tab state ──
     let activeTab = 0;
@@ -222,7 +225,9 @@
     }
 
     // ── run query ──
-    btnRun.addEventListener('click', () => runQuery());
+    btnRun.addEventListener('click', () => {
+        if (isRunning) { cancelQuery(); } else { runQuery(); }
+    });
     btnLoadMd.addEventListener('click', () => vscode.postMessage({ type: 'loadMetadata' }));
     orgLabel.addEventListener('click', () => vscode.postMessage({ type: 'selectOrg' }));
     // Prefix a leading =, +, -, @ so the cell can't be interpreted as a formula
@@ -289,10 +294,11 @@
                 return;
             }
         }
-        // Cmd/Ctrl+Enter runs query
+        // Cmd/Ctrl+Enter runs query (idle only — cancel is an explicit button
+        // click so a stray keypress can't kill an in-flight run).
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
-            runQuery();
+            if (!isRunning) { runQuery(); }
         }
     });
 
@@ -340,11 +346,56 @@
         hideDropdown();
         resultActions.classList.remove('visible');
         resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
-        btnRun.disabled = true;
-        btnRun.textContent = 'Running...';
+        setRunning(true);
         tabs[activeTab].hasResults = false;
         persistState();
         vscode.postMessage({ type: 'executeQuery', query: input.value });
+    }
+
+    function cancelQuery() {
+        vscode.postMessage({ type: 'cancelQuery' });
+        // Optimistic feedback; the provider confirms with an 'info' message that
+        // flips the button back to Run via setRunning(false).
+        btnRun.disabled = true;
+        btnRun.textContent = 'Cancelling…';
+    }
+
+    // Toggle the Run button between "Run" (idle) and "Cancel" (in flight). Kept
+    // enabled while running so the same button cancels the run.
+    function setRunning(running) {
+        isRunning = running;
+        btnRun.disabled = false;
+        btnRun.textContent = running ? '⏹ Cancel' : '▶ Run';
+    }
+
+    // Render the large-query confirm prompt inline in the results area (instead of
+    // a missable VS Code toast). Buttons post the user's choice back to the host.
+    function renderLargeQueryPrompt(totalRows) {
+        const n = esc(String(totalRows));
+        const plural = String(totalRows) === '1' ? '' : 's';
+        resultsArea.innerHTML =
+            '<div class="confirm-prompt">' +
+                '<div class="confirm-msg">Query matches <strong>' + n + '</strong> record' + plural +
+                    '. How do you want to run it?</div>' +
+                '<div class="confirm-actions">' +
+                    '<button class="confirm-btn" data-choice="limit200">Add LIMIT 200</button>' +
+                    '<button class="confirm-btn" data-choice="limit2000">Add LIMIT 2000</button>' +
+                    '<button class="confirm-btn confirm-primary" data-choice="all">Fetch all ' + n + '</button>' +
+                    '<button class="confirm-btn confirm-cancel" data-choice="cancel">Cancel</button>' +
+                '</div>' +
+            '</div>';
+        resultsArea.querySelectorAll('.confirm-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                const choice = btn.getAttribute('data-choice');
+                if (choice === 'cancel') {
+                    cancelQuery();
+                    return;
+                }
+                // Optimistic spinner; provider drives the rest to results/error.
+                resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
+                vscode.postMessage({ type: 'largeQueryChoice', choice: choice });
+            });
+        });
     }
 
     function requestSuggestions() {
@@ -522,14 +573,18 @@
 
             case 'queryStarted':
                 resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
-                btnRun.disabled = true;
-                btnRun.textContent = 'Running...';
+                setRunning(true);
                 tabs[activeTab].hasResults = false;
                 break;
 
+            case 'confirmLargeQuery':
+                // Keep the button in Cancel mode while the user decides.
+                setRunning(true);
+                renderLargeQueryPrompt(msg.totalRows);
+                break;
+
             case 'queryResults':
-                btnRun.disabled = false;
-                btnRun.textContent = '\u25B6 Run';
+                setRunning(false);
                 lastColumns = msg.columns;
                 lastRows = msg.rows;
                 lastRawRows = msg.rawRows || msg.rows || [];
@@ -544,8 +599,7 @@
                 break;
 
             case 'error': {
-                btnRun.disabled = false;
-                btnRun.textContent = '\u25B6 Run';
+                setRunning(false);
                 // Show the concise message, and (when present) the full Salesforce
                 // detail \u2014 query echo + caret + explanation \u2014 in a monospace block
                 // so the user can see exactly what/where was incorrect.
@@ -570,8 +624,7 @@
             }
 
             case 'info':
-                btnRun.disabled = false;
-                btnRun.textContent = '\u25B6 Run';
+                setRunning(false);
                 resultsArea.innerHTML = '<div class="info-msg">' + esc(msg.message) + '</div>';
                 break;
 
