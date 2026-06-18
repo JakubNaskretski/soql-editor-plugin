@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2
+
+- Fixed the sidebar query getting stuck on "Running…" after switching org. The
+  large-result size prompt (Add LIMIT / Fetch all) now appears inside the panel
+  instead of as an easily-missed notification, and the Run button doubles as a
+  Cancel button while a query is in flight, so a run can always be stopped.
+
 ## 0.7.1
 
 - Add a branded extension icon — shown on the Marketplace listing and the activity-bar.
