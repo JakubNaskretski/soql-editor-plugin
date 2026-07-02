@@ -1,6 +1,9 @@
 /** Generates sidebar webview HTML shell and styling. */
 import * as vscode from 'vscode';
 import { PANEL_SCRIPT_RELATIVE_PATH } from './webviewAssets';
+// CSPRNG base64url nonce from the shared kit — retires the old Math.random()
+// nonce (a predictable nonce lets injected markup satisfy `script-src 'nonce-…'`).
+import { getNonce } from './kit/webviewHtml';
 
 export function getPanelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     const nonce = getNonce();
@@ -93,6 +96,42 @@ body {
     background: none;
     border: none;
     padding: 4px 6px;
+}
+.toolbar .tooling-toggle {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 11px;
+    color: var(--vscode-foreground);
+    cursor: pointer;
+    user-select: none;
+}
+.toolbar .tooling-toggle input { cursor: pointer; margin: 0; }
+
+/* ── history dropdown ──────────────────── */
+.history-dropdown {
+    display: none;
+    position: absolute;
+    top: auto; left: 8px;
+    background: var(--vscode-dropdown-background);
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 4px;
+    max-height: 260px; overflow-y: auto;
+    z-index: 150;
+    min-width: 240px; max-width: 92vw;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.history-dropdown.visible { display: block; }
+.history-item {
+    padding: 5px 8px;
+    cursor: pointer;
+    font-size: 12px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.history-item:last-child { border-bottom: none; }
+.history-item:hover { background: var(--vscode-list-hoverBackground); }
+.history-empty {
+    padding: 8px; font-size: 11px;
+    color: var(--vscode-descriptionForeground);
 }
 
 
@@ -398,9 +437,14 @@ body {
 
 <div class="toolbar">
     <button id="btnRun" title="Execute query (Cmd+Enter)">&#9654; Run</button>
+    <button id="btnHistory" title="Query history for the selected org">History &#9662;</button>
     <button id="btnLoadMd" title="Load / refresh metadata for autocomplete">Load Metadata</button>
+    <label class="tooling-toggle" title="Run queries against the Tooling API (ApexClass, CustomField, etc.)">
+        <input type="checkbox" id="chkTooling"> Tooling
+    </label>
     <button class="org-label" id="orgLabel" title="Click to change org">No Org</button>
 </div>
+<div class="history-dropdown" id="historyDropdown"></div>
 
 <div class="error-list" id="errorList"></div>
 <div class="editor-wrapper">
@@ -433,13 +477,4 @@ body {
 <script nonce="${nonce}" src="${scriptUri}"><\/script>
 </body>
 </html>`;
-}
-
-function getNonce(): string {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let out = '';
-    for (let i = 0; i < 32; i++) {
-        out += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return out;
 }

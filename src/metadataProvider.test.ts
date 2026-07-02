@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MetadataProvider } from './metadataProvider';
+import { MetadataProvider, TYPING_DESCRIBE_TIMEOUT_MS, typingDescribeOptions } from './metadataProvider';
 import { SObjectDescribe } from './sfCliService';
 
 const vscodeMockState = {
@@ -296,5 +296,38 @@ describe('MetadataProvider (org-first cache strategy)', () => {
         expect(described).toContain('ns__External__x');
         expect(described).toContain('My_Big__b');
         fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+});
+
+describe('typingDescribeOptions', () => {
+    it('caps the timeout and omits a signal when no token is given', () => {
+        const opts = typingDescribeOptions();
+        expect(opts.timeoutMs).toBe(TYPING_DESCRIBE_TIMEOUT_MS);
+        expect(opts.signal).toBeUndefined();
+    });
+
+    it('returns an already-aborted signal for a pre-cancelled token', () => {
+        const opts = typingDescribeOptions({ isCancellationRequested: true });
+        expect(opts.signal?.aborted).toBe(true);
+        expect(opts.timeoutMs).toBe(TYPING_DESCRIBE_TIMEOUT_MS);
+    });
+
+    it('aborts the signal when the token fires later', () => {
+        let fire: (() => void) | undefined;
+        const token = {
+            isCancellationRequested: false,
+            onCancellationRequested: (cb: () => void) => { fire = cb; return { dispose() {} }; },
+        };
+        const opts = typingDescribeOptions(token);
+        expect(opts.signal?.aborted).toBe(false);
+        fire!();
+        expect(opts.signal?.aborted).toBe(true);
+    });
+
+    it('tolerates a token without onCancellationRequested (still supplies a signal)', () => {
+        // Defensive: some call sites / test doubles pass a bare token.
+        const opts = typingDescribeOptions({ isCancellationRequested: false });
+        expect(opts.signal).toBeInstanceOf(AbortSignal);
+        expect(opts.signal?.aborted).toBe(false);
     });
 });

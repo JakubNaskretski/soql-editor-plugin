@@ -9,6 +9,8 @@ import { SoqlDiagnosticsProvider } from './diagnosticsProvider';
 import { QueryExecutor } from './queryExecutor';
 import { SoqlPanelProvider } from './soqlPanelProvider';
 import { MetadataProvider } from './metadataProvider';
+import { QueryHistoryStore } from './queryHistory';
+import { getSharedOrg, migrateToSharedOrg, onSharedOrgChange, setSharedOrg } from './kit/orgs';
 
 const SOQL_SELECTOR: vscode.DocumentSelector = { language: 'soql', scheme: 'file' };
 const LAST_SELECTED_ORG_KEY = 'soqlEditor.lastSelectedOrgUsername';
@@ -20,12 +22,14 @@ export function activate(context: vscode.ExtensionContext) {
     // Core services
     const sfCli = new SfCliService(outputChannel);
     const metadata = new MetadataProvider(sfCli, outputChannel, context.globalStorageUri.fsPath);
+    // Per-org query history (globalState ring buffer, 50 entries).
+    const history = new QueryHistoryStore(context.globalState);
 
     // Org picker (status bar + quick pick)
     const orgPicker = new OrgPicker(sfCli);
 
     // Sidebar panel
-    const panelProvider = new SoqlPanelProvider(sfCli, metadata, outputChannel, context.extensionUri);
+    const panelProvider = new SoqlPanelProvider(sfCli, metadata, outputChannel, context.extensionUri, history);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(SoqlPanelProvider.viewType, panelProvider, {
             webviewOptions: { retainContextWhenHidden: true }
@@ -40,7 +44,14 @@ export function activate(context: vscode.ExtensionContext) {
     // Single org-change handler (consolidated; previously two separate listeners
     // were registered, neither disposed).
     orgPicker.onOrgChanged(async (org) => {
+        // Keep the legacy private key updated for one release (migration fallback),
+        // and mirror to the shared cross-plugin setting so the rest of the family
+        // retargets the same org (Tier 1). The picker also writes the shared
+        // setting directly; this covers startup auto-select / external switches.
         await context.globalState.update(LAST_SELECTED_ORG_KEY, org.username);
+        if (getSharedOrg() !== org.username) {
+            void setSharedOrg(org.username);
+        }
 
         // Drop the shared, non-per-org in-memory caches so the new org never
         // briefly serves the previous org's object list (30s TTL window).
@@ -60,15 +71,27 @@ export function activate(context: vscode.ExtensionContext) {
         await maybePromptForMetadataReadiness(metadata, promptType);
     });
 
-    // Auto-select default org (after listener is registered)
+    // Auto-select default org (after listener is registered). Prefer the shared
+    // cross-plugin setting; one-time seed it from the legacy private key so an
+    // existing install keeps its org and starts publishing it to the family.
     const lastSelectedOrg = context.globalState.get<string>(LAST_SELECTED_ORG_KEY);
-    orgPicker.autoSelectDefault(lastSelectedOrg);
+    void migrateToSharedOrg(lastSelectedOrg).then(effectiveOrg =>
+        orgPicker.autoSelectDefault(effectiveOrg ?? lastSelectedOrg)
+    );
+
+    // React to external writes of the shared setting (another family plugin or
+    // the user editing settings) by retargeting this plugin to that org.
+    context.subscriptions.push(
+        onSharedOrgChange(username => {
+            void orgPicker.applyExternalOrgUsername(username);
+        })
+    );
 
     // Autocomplete
     const completionProvider = new SoqlCompletionProvider(metadata);
 
     // Query execution
-    const queryExecutor = new QueryExecutor(sfCli, metadata, outputChannel);
+    const queryExecutor = new QueryExecutor(sfCli, metadata, outputChannel, history);
 
     // Register completion provider — trigger on `.` (for relationship traversals) and `,`
     context.subscriptions.push(
@@ -83,6 +106,12 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('soqlEditor.executeQuery', () => {
             queryExecutor.executeCurrentQuery();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('soqlEditor.queryHistory', () => {
+            return queryExecutor.pickFromHistory();
         })
     );
 

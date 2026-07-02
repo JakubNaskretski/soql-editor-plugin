@@ -11,6 +11,9 @@
     const btnCopyCSV = document.getElementById('btnCopyCSV');
     const btnExportJSON = document.getElementById('btnExportJSON');
     const btnRun = document.getElementById('btnRun');
+    const btnHistory = document.getElementById('btnHistory');
+    const chkTooling = document.getElementById('chkTooling');
+    const historyDropdown = document.getElementById('historyDropdown');
     const btnLoadMd = document.getElementById('btnLoadMd');
     const orgLabel = document.getElementById('orgLabel');
     const consoleHeader = document.getElementById('consoleHeader');
@@ -43,16 +46,35 @@
     // True while a run is in flight (preflight, confirm prompt, or the query
     // itself). Drives the Run⇄Cancel toggle so a run can always be cancelled.
     let isRunning = false;
+    // Panel-global Tooling API toggle (persisted). Sent with every run so the
+    // host adds --use-tooling-api.
+    let useToolingApi = false;
 
     // ── multi-tab state ──
+    // Each tab carries a stable, never-reused `id`. A query run is stamped with
+    // the id of the tab that launched it, so the host's response messages route
+    // back to that tab even if the user switched/closed tabs mid-run (see
+    // tabIndexForRunId). `nextTabId` is the monotonic id allocator.
+    let nextTabId = 1;
     let activeTab = 0;
-    let tabs = [
-        { query: '', columns: [], rows: [], rawRows: [], totalSize: 0, errors: [], hasResults: false }
-    ];
+    let tabs = [createTabState()];
 
     function createTabState() {
-        return { query: '', columns: [], rows: [], rawRows: [], totalSize: 0, errors: [], hasResults: false };
+        return { id: nextTabId++, query: '', columns: [], rows: [], rawRows: [], totalSize: 0, errors: [], hasResults: false };
     }
+
+    // Mirror of src/tabRouting.ts `tabIndexForRunId` — resolve a run's tab by its
+    // stable id (‑1 if that tab was closed while the run was in flight, so the
+    // message is dropped rather than mis-attributed to the active tab). Keep in
+    // sync with the tested TS source.
+    function tabIndexForRunId(tabList, runId) {
+        if (runId === undefined || runId === null) { return -1; }
+        return tabList.findIndex(t => t.id === runId);
+    }
+
+    // The tab id whose run is currently in flight (set by runQuery, echoed by the
+    // host on every response). null when idle.
+    let runTabId = null;
 
     // ── tab bar rendering ──
     function renderTabBar() {
@@ -97,7 +119,12 @@
         lastColumns = tab.columns || [];
         lastRows = tab.rows || [];
         lastRawRows = tab.rawRows || [];
-        if (tab.hasResults && lastColumns.length > 0) {
+        // If this tab has a run in flight, show its spinner (results/errors will
+        // paint when the run's message routes back here).
+        if (runTabId !== null && tab.id === runTabId) {
+            resultActions.classList.remove('visible');
+            resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
+        } else if (tab.hasResults && lastColumns.length > 0) {
             resultActions.classList.add('visible');
             renderResults(lastColumns, lastRows, tab.totalSize || lastRows.length);
         } else {
@@ -106,6 +133,8 @@
         }
         renderErrorList();
         highlightSoql();
+        // The Run/Cancel button reflects whichever tab is now active.
+        syncRunButton();
     }
 
     function switchTab(idx) {
@@ -154,6 +183,7 @@
         // dropping the query text along with the rows. We keep the in-memory
         // tabs[] full for the live session; only the persisted snapshot is slim.
         const persistedTabs = tabs.map(tab => ({
+            id: tab.id,
             query: tab.query || '',
             errors: tab.errors || [],
             hasResults: false,
@@ -162,7 +192,7 @@
             rawRows: [],
             totalSize: 0,
         }));
-        vscode.setState({ tabs: persistedTabs, activeTab, orgLabel: currentOrgLabel });
+        vscode.setState({ tabs: persistedTabs, activeTab, orgLabel: currentOrgLabel, nextTabId, useToolingApi });
     }
 
     function bindResultListeners() {
@@ -187,6 +217,72 @@
     }
 
     btnAddTab.addEventListener('click', () => addTab());
+
+    // ── Tooling API toggle ──
+    chkTooling.addEventListener('change', () => {
+        useToolingApi = chkTooling.checked;
+        persistState();
+    });
+
+    // ── query history dropdown ──
+    btnHistory.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (historyDropdown.classList.contains('visible')) {
+            hideHistory();
+            return;
+        }
+        // Request fresh history for the current org, then render on the reply.
+        vscode.postMessage({ type: 'requestHistory' });
+    });
+
+    function hideHistory() {
+        historyDropdown.classList.remove('visible');
+        historyDropdown.innerHTML = '';
+    }
+
+    // Render the history dropdown anchored under the History button. Each item
+    // loads its query into the active tab's editor on click.
+    function renderHistory(entries) {
+        if (!entries || entries.length === 0) {
+            historyDropdown.innerHTML = '<div class="history-empty">No query history for this org yet.</div>';
+        } else {
+            historyDropdown.innerHTML = entries.map((e, i) => {
+                // Collapse whitespace for a compact single-line label; the full
+                // query (with newlines) is loaded on click via data-idx.
+                const oneLine = String(e.query || '').replace(/\s+/g, ' ').trim();
+                return '<div class="history-item" data-idx="' + i + '" title="' + esc(oneLine) + '">' + esc(oneLine) + '</div>';
+            }).join('');
+            historyDropdown.querySelectorAll('.history-item').forEach(function(el) {
+                el.addEventListener('click', function() {
+                    const idx = parseInt(el.getAttribute('data-idx'), 10);
+                    const entry = entries[idx];
+                    if (entry) { loadQueryIntoActiveTab(entry.query); }
+                    hideHistory();
+                });
+            });
+        }
+        // Anchor just below the History button.
+        const rect = btnHistory.getBoundingClientRect();
+        historyDropdown.style.left = rect.left + 'px';
+        historyDropdown.style.top = rect.bottom + 'px';
+        historyDropdown.classList.add('visible');
+    }
+
+    function loadQueryIntoActiveTab(query) {
+        input.value = query || '';
+        tabs[activeTab].query = input.value;
+        persistState();
+        highlightSoql();
+        requestValidation();
+        input.focus();
+    }
+
+    // Dismiss the history dropdown on any outside click.
+    document.addEventListener('click', (e) => {
+        if (!historyDropdown.contains(e.target) && e.target !== btnHistory) {
+            hideHistory();
+        }
+    });
 
     // ── console ──
     consoleHeader.addEventListener('click', (e) => {
@@ -346,10 +442,13 @@
         hideDropdown();
         resultActions.classList.remove('visible');
         resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
-        setRunning(true);
+        // Stamp the run with the launching tab's stable id so its results route
+        // back here even if the user switches tabs before they arrive.
+        const launchTabId = tabs[activeTab].id;
+        setRunning(true, launchTabId);
         tabs[activeTab].hasResults = false;
         persistState();
-        vscode.postMessage({ type: 'executeQuery', query: input.value });
+        vscode.postMessage({ type: 'executeQuery', query: input.value, runTabId: launchTabId, useToolingApi: useToolingApi });
     }
 
     function cancelQuery() {
@@ -360,12 +459,22 @@
         btnRun.textContent = 'Cancelling…';
     }
 
-    // Toggle the Run button between "Run" (idle) and "Cancel" (in flight). Kept
-    // enabled while running so the same button cancels the run.
-    function setRunning(running) {
-        isRunning = running;
+    // Mark a run as started/ended for a specific tab id. Because the host serves
+    // one run at a time panel-wide, `runTabId` holds the single in-flight run's
+    // tab id (or null when idle). The button reflects the ACTIVE tab, so a run on
+    // a background tab doesn't show Cancel on the tab you're looking at.
+    function setRunning(running, tabId) {
+        // Default to the active tab's id for callers that don't route (button clicks).
+        const id = tabId === undefined ? tabs[activeTab].id : tabId;
+        runTabId = running ? id : (runTabId === id ? null : runTabId);
+        syncRunButton();
+    }
+
+    // Reflect the active tab's run state on the shared Run/Cancel button.
+    function syncRunButton() {
+        isRunning = runTabId !== null && tabs[activeTab] && tabs[activeTab].id === runTabId;
         btnRun.disabled = false;
-        btnRun.textContent = running ? '⏹ Cancel' : '▶ Run';
+        btnRun.textContent = isRunning ? '⏹ Cancel' : '▶ Run';
     }
 
     // Render the large-query confirm prompt inline in the results area (instead of
@@ -550,6 +659,21 @@
         setTimeout(() => el.remove(), 2000);
     }
 
+    // Route a run's outcome to the tab that started it (by stable id), not to
+    // whatever tab happens to be active when the message lands. `mutate(tab)`
+    // updates that tab's stored state; `renderActive(tab)` paints the shared DOM
+    // and runs only when the routed tab is the one on screen. A -1 (closed tab)
+    // still ends the run book-keeping but skips state/DOM writes.
+    function routeRunMessage(runId, mutate, renderActive) {
+        const idx = tabIndexForRunId(tabs, runId);
+        setRunning(false, runId);
+        if (idx < 0) { return; }
+        const tab = tabs[idx];
+        if (mutate) { mutate(tab); }
+        if (idx === activeTab && renderActive) { renderActive(tab); }
+        persistState();
+    }
+
     // ── messages from extension ──
     window.addEventListener('message', (event) => {
         const msg = event.data;
@@ -571,66 +695,92 @@
                 renderDropdown();
                 break;
 
-            case 'queryStarted':
-                resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
-                setRunning(true);
-                tabs[activeTab].hasResults = false;
+            case 'queryStarted': {
+                // A run started (or was already stamped by runQuery). Mark the
+                // owning tab running; only repaint the spinner if it's on screen.
+                const idx = tabIndexForRunId(tabs, msg.runTabId);
+                setRunning(true, msg.runTabId);
+                if (idx >= 0) {
+                    tabs[idx].hasResults = false;
+                    if (idx === activeTab) {
+                        resultsArea.innerHTML = '<div class="spinner">Running query...</div>';
+                    }
+                }
                 break;
+            }
 
-            case 'confirmLargeQuery':
-                // Keep the button in Cancel mode while the user decides.
-                setRunning(true);
-                renderLargeQueryPrompt(msg.totalRows);
+            case 'confirmLargeQuery': {
+                // The run is still in flight (awaiting the user's size choice).
+                const idx = tabIndexForRunId(tabs, msg.runTabId);
+                setRunning(true, msg.runTabId);
+                // The prompt has interactive buttons wired to the live run, so
+                // only surface it when its tab is active. If the user switched
+                // away, the choice can't be made from here; the run stays parked
+                // until they return (the button shows Cancel on the run's tab).
+                if (idx === activeTab) {
+                    renderLargeQueryPrompt(msg.totalRows);
+                }
                 break;
+            }
 
             case 'queryResults':
-                setRunning(false);
-                lastColumns = msg.columns;
-                lastRows = msg.rows;
-                lastRawRows = msg.rawRows || msg.rows || [];
-                resultActions.classList.add('visible');
-                renderResults(msg.columns, msg.rows, msg.totalSize);
-                tabs[activeTab].columns = lastColumns;
-                tabs[activeTab].rows = lastRows;
-                tabs[activeTab].rawRows = lastRawRows;
-                tabs[activeTab].totalSize = msg.totalSize;
-                tabs[activeTab].hasResults = true;
-                persistState();
+                routeRunMessage(msg.runTabId, (tab) => {
+                    tab.columns = msg.columns;
+                    tab.rows = msg.rows;
+                    tab.rawRows = msg.rawRows || msg.rows || [];
+                    tab.totalSize = msg.totalSize;
+                    tab.hasResults = true;
+                }, (tab) => {
+                    lastColumns = tab.columns;
+                    lastRows = tab.rows;
+                    lastRawRows = tab.rawRows;
+                    resultActions.classList.add('visible');
+                    renderResults(tab.columns, tab.rows, tab.totalSize);
+                });
                 break;
 
             case 'error': {
-                setRunning(false);
-                // Show the concise message, and (when present) the full Salesforce
-                // detail \u2014 query echo + caret + explanation \u2014 in a monospace block
-                // so the user can see exactly what/where was incorrect.
-                let errHtml = '<div class="error-msg">&#10060; ' + esc(msg.message) + '</div>';
-                if (msg.detail && msg.detail !== msg.message) {
-                    errHtml += '<pre class="error-detail" style="white-space:pre-wrap;'
-                        + 'font-family:var(--vscode-editor-font-family,monospace);font-size:12px;'
-                        + 'margin-top:8px;padding:8px;overflow:auto;'
-                        + 'border-left:3px solid var(--vscode-editorError-foreground,#f48771);'
-                        + 'opacity:.9;">' + esc(msg.detail) + '</pre>';
-                }
-                resultsArea.innerHTML = errHtml;
-                tabs[activeTab].hasResults = false;
-                // Clear stale squiggles \u2014 a server-side error supersedes any
-                // local validation diagnostics displayed against the previous text.
-                currentErrors = [];
-                tabs[activeTab].errors = [];
-                renderErrorList();
-                highlightSoql();
-                persistState();
+                routeRunMessage(msg.runTabId, (tab) => {
+                    tab.hasResults = false;
+                    // Clear stale squiggles \u2014 a server-side error supersedes any
+                    // local validation diagnostics against the previous text.
+                    tab.errors = [];
+                }, () => {
+                    // Show the concise message, and (when present) the full
+                    // Salesforce detail (query echo + caret + explanation) in a
+                    // monospace block so the user sees exactly what was wrong.
+                    let errHtml = '<div class="error-msg">&#10060; ' + esc(msg.message) + '</div>';
+                    if (msg.detail && msg.detail !== msg.message) {
+                        errHtml += '<pre class="error-detail" style="white-space:pre-wrap;'
+                            + 'font-family:var(--vscode-editor-font-family,monospace);font-size:12px;'
+                            + 'margin-top:8px;padding:8px;overflow:auto;'
+                            + 'border-left:3px solid var(--vscode-editorError-foreground,#f48771);'
+                            + 'opacity:.9;">' + esc(msg.detail) + '</pre>';
+                    }
+                    resultsArea.innerHTML = errHtml;
+                    currentErrors = [];
+                    renderErrorList();
+                    highlightSoql();
+                });
                 break;
             }
 
             case 'info':
-                setRunning(false);
-                resultsArea.innerHTML = '<div class="info-msg">' + esc(msg.message) + '</div>';
+                routeRunMessage(msg.runTabId, null, () => {
+                    resultsArea.innerHTML = '<div class="info-msg">' + esc(msg.message) + '</div>';
+                });
+                break;
+
+            case 'history':
+                renderHistory(msg.entries || []);
                 break;
 
             case 'orgChanged':
                 currentOrgLabel = msg.alias || msg.username || 'No Org';
                 orgLabel.textContent = currentOrgLabel;
+                // The org changed — any open history dropdown belongs to the old
+                // org, so close it (the next open re-requests for the new org).
+                hideHistory();
                 persistState();
                 appendLog('info', 'Switched to org: ' + (msg.alias || msg.username));
                 break;
@@ -863,8 +1013,23 @@
 
     // Restore state
     const state = vscode.getState();
+    if (state && typeof state.useToolingApi === 'boolean') {
+        useToolingApi = state.useToolingApi;
+        chkTooling.checked = useToolingApi;
+    }
     if (state && state.tabs) {
         tabs = state.tabs;
+        // Re-seed the id allocator past any persisted ids, and backfill ids for
+        // tabs saved by a pre-routing build (which had no `id`), so routing has a
+        // stable key for every tab. No run is in flight after a reload.
+        let maxId = state.nextTabId ? state.nextTabId - 1 : 0;
+        for (const tab of tabs) {
+            if (typeof tab.id === 'number') { maxId = Math.max(maxId, tab.id); }
+        }
+        nextTabId = maxId + 1;
+        for (const tab of tabs) {
+            if (typeof tab.id !== 'number') { tab.id = nextTabId++; }
+        }
         activeTab = state.activeTab || 0;
         if (activeTab >= tabs.length) activeTab = 0;
         if (state.orgLabel) {

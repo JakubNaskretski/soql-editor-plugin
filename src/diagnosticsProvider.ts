@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SfCliService } from './sfCliService';
-import { MetadataProvider } from './metadataProvider';
+import { MetadataProvider, typingDescribeOptions } from './metadataProvider';
 import { validateSoqlStructure, extractFromObject, extractSelectFields } from './soqlParser';
 
 /**
@@ -86,7 +86,9 @@ export class SoqlDiagnosticsProvider {
         const objectName = extractFromObject(text);
         if (!objectName) { return []; }
 
-        const describe = await this.metadata.describeSObject(objectName);
+        // Live diagnostics fire on a debounce as the user types; cap the describe
+        // timeout so an un-synced org can't stack slow subprocesses per keystroke.
+        const describe = await this.metadata.describeSObject(objectName, typingDescribeOptions());
         if (!describe) {
             // Can't validate — maybe object doesn't exist
             const fromMatch = text.match(/\bFROM\s+(\w+)/i);

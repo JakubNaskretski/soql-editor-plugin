@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
 import { normalizeSObjectApiName } from './sobjectName';
+import { resolveSfCommand } from './kit/sfCli';
 export { normalizeSObjectApiName } from './sobjectName';
 
 /** A SOQL query failure parsed into its useful parts. */
@@ -122,6 +123,8 @@ export interface SObjectDescribe {
 
 export interface DescribeOptions {
     timeoutMs?: number;
+    /** Abort the CLI describe when the caller cancels (e.g. a completion token). */
+    signal?: AbortSignal;
 }
 
 export interface DescribeResult {
@@ -139,6 +142,11 @@ export class SfCliService {
     private objectListCache: string[] | undefined;
     private outputChannel: vscode.OutputChannel;
     private lastObjectListError: string | undefined;
+    /** Absolute path (or bare name) of the `sf` launcher, resolved once. On
+     *  Windows this is the `sf.cmd`/`sf.ps1` shim path that execFile can actually
+     *  start; on POSIX it stays `'sf'`. Fixes the family-wide Windows bug where
+     *  `execFile('sf')` failed and was misreported as "sf not found on PATH". */
+    private resolvedSfCommand: string | undefined;
 
     private logEmitter = new vscode.EventEmitter<{ level: string; message: string }>();
     public readonly onLog = this.logEmitter.event;
@@ -285,6 +293,7 @@ export class SfCliService {
                 ...targetOrgArgs,
             ], {
                 timeoutMs: options?.timeoutMs,
+                signal: options?.signal,
                 logLabel: `sf sobject describe --sobject ${normalizedName} --json`,
             });
             const describe = this.parseDescribeResult(result);
@@ -456,9 +465,14 @@ export class SfCliService {
         options?: { timeoutMs?: number; logLabel?: string; signal?: AbortSignal }
     ): Promise<string> {
         this.log('cmd', options?.logLabel || `sf ${this.redactArgsForLog(args)}`);
+        // Resolve the launcher once (Windows `sf.cmd` shim path; `'sf'` elsewhere).
+        if (this.resolvedSfCommand === undefined) {
+            this.resolvedSfCommand = resolveSfCommand();
+        }
+        const sfCommand = this.resolvedSfCommand;
         return new Promise((resolve, reject) => {
             execFile(
-                'sf',
+                sfCommand,
                 args,
                 { timeout: options?.timeoutMs ?? 60000, maxBuffer: 10 * 1024 * 1024, signal: options?.signal },
                 (error, stdout, stderr) => {

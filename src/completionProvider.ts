@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset, ScopedFromInfo } from './soqlParser';
-import { MetadataProvider } from './metadataProvider';
+import { MetadataProvider, typingDescribeOptions } from './metadataProvider';
 import { resolveRelationshipChain } from './relationshipChain';
 import { getSubqueryFromSuggestions } from './panelSuggestions';
 import {
@@ -144,7 +144,7 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
             return this.getRelationshipFieldCompletions(objectName, partial, usage, token);
         }
 
-        const describe = await this.metadata.describeSObject(objectName);
+        const describe = await this.metadata.describeSObject(objectName, typingDescribeOptions(token));
         if (!describe || token?.isCancellationRequested) {
             return [];
         }
@@ -262,7 +262,8 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
             objectName,
             dotParts.slice(0, -1),
             this.metadata,
-            () => token?.isCancellationRequested === true
+            () => token?.isCancellationRequested === true,
+            typingDescribeOptions(token)
         );
         if (!resolved || token?.isCancellationRequested) { return []; }
 
@@ -331,7 +332,9 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
      */
     private async resolveFieldForValue(objectName: string, path: string) {
         const segments = path.split('.');
-        const describe = await resolveRelationshipChain(objectName, segments.slice(0, -1), this.metadata);
+        const describe = await resolveRelationshipChain(
+            objectName, segments.slice(0, -1), this.metadata, undefined, typingDescribeOptions()
+        );
         if (!describe) { return undefined; }
         const leaf = segments[segments.length - 1].toLowerCase();
         return describe.fields.find(f => f.name.toLowerCase() === leaf);
@@ -449,7 +452,9 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         if (!parentObj) {
             return scoped.fromName;
         }
-        const parentDescribe = await this.metadata.describeSObject(parentObj);
+        // No token in scope here (called from several paths); still cap the
+        // describe timeout so subquery-parent resolution can't hang a keystroke.
+        const parentDescribe = await this.metadata.describeSObject(parentObj, typingDescribeOptions());
         const childRel = parentDescribe?.childRelationships.find(
             rel => rel.relationshipName?.toLowerCase() === scoped.fromName.toLowerCase()
         );
