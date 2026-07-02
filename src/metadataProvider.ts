@@ -8,6 +8,33 @@ import { extractFromObject, extractSelectFields } from './soqlParser';
 
 export type CacheSourceState = 'none' | 'local-fallback' | 'org';
 
+/**
+ * Shorter timeout cap for describe calls made from an interactive typing path
+ * (completions, live diagnostics). Sync uses its own (longer, configurable)
+ * timeout; here a stuck describe would starve every subsequent keystroke's
+ * completion, so cap it aggressively.
+ */
+export const TYPING_DESCRIBE_TIMEOUT_MS = 10000;
+
+/**
+ * Build describe options for a typing-path call: a short timeout cap plus a
+ * signal that aborts the underlying CLI describe when the caller's cancellation
+ * token fires (VS Code cancels stale completion requests on the next keystroke).
+ * Returns `undefined` for the signal when no token is supplied.
+ */
+export function typingDescribeOptions(
+    token?: { isCancellationRequested: boolean; onCancellationRequested?: (cb: () => void) => { dispose(): void } }
+): { signal?: AbortSignal; timeoutMs: number } {
+    if (!token) { return { timeoutMs: TYPING_DESCRIBE_TIMEOUT_MS }; }
+    const controller = new AbortController();
+    if (token.isCancellationRequested) {
+        controller.abort();
+    } else if (typeof token.onCancellationRequested === 'function') {
+        token.onCancellationRequested(() => controller.abort());
+    }
+    return { signal: controller.signal, timeoutMs: TYPING_DESCRIBE_TIMEOUT_MS };
+}
+
 interface PlaceholderCacheData {
     objects: Record<string, { fields: string[] }>;
 }
@@ -163,8 +190,19 @@ export class MetadataProvider {
         } catch { /* ignore */ }
     }
 
-    /** Describe an SObject via in-memory cache, disk cache, then live org. */
-    async describeSObject(objectName: string): Promise<SObjectDescribe | undefined> {
+    /**
+     * Describe an SObject via in-memory cache, disk cache, then live org.
+     *
+     * `options` only reaches tier 3 (the live CLI describe) — the cache tiers are
+     * synchronous and instant. Typing-path callers pass a short `timeoutMs` cap
+     * and a `signal` wired to the completion CancellationToken so a cache-miss
+     * describe can't pile up 60s subprocesses against an un-synced org (the MED
+     * this addresses).
+     */
+    async describeSObject(
+        objectName: string,
+        options?: { signal?: AbortSignal; timeoutMs?: number }
+    ): Promise<SObjectDescribe | undefined> {
         const normalizedName = normalizeSObjectApiName(objectName);
         if (!normalizedName) {
             this.outputChannel.appendLine(`Rejected invalid object name for describe: "${objectName}"`);
@@ -184,8 +222,14 @@ export class MetadataProvider {
             return diskCached;
         }
 
+        // Already cancelled before the (slow) live describe — bail without shelling out.
+        if (options?.signal?.aborted) { return undefined; }
+
         // 3. Try live CLI describe
-        const live = await this.sfCli.describeSObject(normalizedName);
+        const live = await this.sfCli.describeSObject(normalizedName, {
+            signal: options?.signal,
+            timeoutMs: options?.timeoutMs,
+        });
         if (live) {
             this.saveToDiskCache(normalizedName, live);
             this.setCurrentOrgCacheSourceState('org');

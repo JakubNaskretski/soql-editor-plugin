@@ -7,6 +7,7 @@ import { validateSoqlStructure } from './soqlParser';
 import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
 import { flattenRecordForDisplay } from './resultFlattening';
 import { PANEL_LOCAL_RESOURCE_ROOT } from './webviewAssets';
+import { QueryHistoryStore } from './queryHistory';
 
 /** The user's answer to the in-panel large-query confirm prompt. */
 type LargeQueryChoice = 'limit200' | 'limit2000' | 'all' | 'cancel';
@@ -21,6 +22,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
     private metadata: MetadataProvider;
     private outputChannel: vscode.OutputChannel;
     private extensionUri: vscode.Uri;
+    private history: QueryHistoryStore;
     private logSubscription?: vscode.Disposable;
     private executing = false;
     /** Aborts the in-flight CLI call (COUNT preflight or the query itself) when
@@ -34,11 +36,12 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
      *  result set across the postMessage boundary on a "Fetch all". */
     private static readonly MAX_PANEL_ROWS = 50000;
 
-    constructor(sfCli: SfCliService, metadata: MetadataProvider, outputChannel: vscode.OutputChannel, extensionUri: vscode.Uri) {
+    constructor(sfCli: SfCliService, metadata: MetadataProvider, outputChannel: vscode.OutputChannel, extensionUri: vscode.Uri, history: QueryHistoryStore) {
         this.sfCli = sfCli;
         this.metadata = metadata;
         this.outputChannel = outputChannel;
         this.extensionUri = extensionUri;
+        this.history = history;
     }
 
     private getSlowQueryWarningThreshold(): number {
@@ -86,16 +89,29 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
             if (this.view === webviewView) {
                 this.view = undefined;
             }
+            // Settle any in-flight run so a disposed webview can't wedge the panel:
+            // a pending large-query confirm would otherwise never resolve (its
+            // resolver is gone with the DOM), leaving `executing` stuck true and
+            // blocking every future run until a window reload. Abort the CLI call,
+            // settle the confirm as a cancel, and clear the busy flag. A fresh
+            // webview then boots idle with a working Run button.
+            this.settleInFlightRun();
         });
 
         webviewView.webview.onDidReceiveMessage(async (msg: any) => {
             try {
                 switch (msg.type) {
                     case 'executeQuery':
-                        await this.handleExecuteQuery(msg.query);
+                        await this.handleExecuteQuery(msg.query, msg.runTabId, msg.useToolingApi === true);
                         break;
                     case 'cancelQuery':
                         this.handleCancelQuery();
+                        break;
+                    case 'requestHistory':
+                        this.postMessage({
+                            type: 'history',
+                            entries: this.history.list(this.sfCli.getCurrentOrg()?.username),
+                        });
                         break;
                     case 'largeQueryChoice':
                         this.resolveLargeQueryChoice(msg.choice);
@@ -244,19 +260,23 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
 
     // ── query execution ──────────────────────────────────────────────
 
-    private async handleExecuteQuery(query: string) {
+    private async handleExecuteQuery(query: string, runTabId?: number, useToolingApi = false) {
         if (!query.trim()) { return; }
         if (!this.sfCli.getCurrentOrg()) {
-            this.postMessage({ type: 'error', message: 'Select an org first (click the org button above)' });
+            this.postMessage({ type: 'error', message: 'Select an org first (click the org button above)', runTabId });
             return;
         }
+
+        // The user's original query (before any auto-appended LIMIT) is recorded
+        // to history on a successful run.
+        const historyQuery = query;
 
         // Re-entrancy guard: overlapping runs race on the results message — a slower
         // earlier query could overwrite a later one (last-to-arrive wins). While a
         // run is in flight the webview's Run button becomes Cancel, so a second
         // click cancels rather than re-entering here.
         if (this.executing) {
-            this.postMessage({ type: 'info', message: 'A query is already running' });
+            this.postMessage({ type: 'info', message: 'A query is already running', runTabId });
             return;
         }
         this.executing = true;
@@ -264,8 +284,10 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         this.currentAbort = abort;
 
         // Notify UI immediately so users get instant feedback on Run/Cmd+Enter,
-        // even while preflight checks are still running.
-        this.postMessage({ type: 'queryStarted' });
+        // even while preflight checks are still running. Every response for this
+        // run carries the launching tab's id so the webview routes it back to
+        // that tab regardless of which tab is active when it arrives.
+        this.postMessage({ type: 'queryStarted', runTabId });
 
         try {
             // Safety: if no LIMIT, run a COUNT() first to warn the user
@@ -274,7 +296,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                 if (countQuery) {
                     this.postMessage({ type: 'log', level: 'cmd', message: 'Preparing COUNT() preflight query' });
                     try {
-                        const countResult = await this.sfCli.executeQuery(countQuery, false, abort.signal);
+                        const countResult = await this.sfCli.executeQuery(countQuery, useToolingApi, abort.signal);
                         const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
                         const threshold = this.getSlowQueryWarningThreshold();
                         if (shouldPromptForCount(totalRows, threshold)) {
@@ -284,9 +306,9 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                             // notification center and the run wedges on "Running..." with
                             // the LIMIT options the user never saw. The in-panel prompt
                             // can't be buried, and Cancel is always one click away.
-                            const choice = await this.askLargeQueryChoice(totalRows);
+                            const choice = await this.askLargeQueryChoice(totalRows, runTabId);
                             if (choice === 'cancel') {
-                                this.postMessage({ type: 'info', message: 'Query cancelled' });
+                                this.postMessage({ type: 'info', message: 'Query cancelled', runTabId });
                                 return;
                             }
                             if (choice === 'limit200') {
@@ -299,7 +321,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                         }
                     } catch (err: any) {
                         if (abort.signal.aborted) {
-                            this.postMessage({ type: 'info', message: 'Query cancelled' });
+                            this.postMessage({ type: 'info', message: 'Query cancelled', runTabId });
                             return;
                         }
                         // Surface (don't swallow) the preflight failure. Mirror it to
@@ -323,10 +345,12 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
             // (and pollute the cache of) the new org with this query's fields.
             const orgAtStart = this.sfCli.getCurrentOrg()?.username;
 
-            const result = await this.sfCli.executeQuery(query, false, abort.signal);
+            const result = await this.sfCli.executeQuery(query, useToolingApi, abort.signal);
             if (this.sfCli.getCurrentOrg()?.username === orgAtStart) {
                 await this.metadata.reconcileSuccessfulQuery(query);
             }
+            // Record the successful run in this org's history.
+            await this.history.add(orgAtStart, historyQuery);
             const allRecords: any[] = result.records || [];
             const totalSize: number = result.totalSize || allRecords.length;
 
@@ -353,12 +377,12 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                 return row;
             });
 
-            this.postMessage({ type: 'queryResults', columns, rows, rawRows: records, totalSize });
+            this.postMessage({ type: 'queryResults', columns, rows, rawRows: records, totalSize, runTabId });
         } catch (err: any) {
             if (abort.signal.aborted) {
                 // User cancelled — not an error. (The CLI rejects with a generic
                 // envelope on SIGTERM, so key off our own signal, not err shape.)
-                this.postMessage({ type: 'info', message: 'Query cancelled' });
+                this.postMessage({ type: 'info', message: 'Query cancelled', runTabId });
             } else {
                 this.outputChannel.appendLine(`Panel query error: ${err?.detail ?? err?.message ?? err}`);
                 this.postMessage({
@@ -368,6 +392,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                     code: err?.code,
                     line: err?.line,
                     column: err?.column,
+                    runTabId,
                 });
             }
         } finally {
@@ -382,10 +407,10 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
      * the user's choice (or a cancel). The returned promise is settled by
      * `resolveLargeQueryChoice` / `handleCancelQuery`.
      */
-    private askLargeQueryChoice(totalRows: number | string): Promise<LargeQueryChoice> {
+    private askLargeQueryChoice(totalRows: number | string, runTabId?: number): Promise<LargeQueryChoice> {
         return new Promise<LargeQueryChoice>(resolve => {
             this.pendingConfirm = resolve;
-            this.postMessage({ type: 'confirmLargeQuery', totalRows });
+            this.postMessage({ type: 'confirmLargeQuery', totalRows, runTabId });
         });
     }
 
@@ -406,6 +431,22 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         this.currentAbort?.abort();
         // If we're parked on the confirm prompt (no CLI call in flight), unblock it.
         this.resolveLargeQueryChoice('cancel');
+    }
+
+    /**
+     * Tear down any in-flight run so the panel can't wedge (used on webview
+     * dispose). Aborts the CLI call, settles a pending large-query confirm as a
+     * cancel, and clears the busy flag synchronously. Idempotent — safe to call
+     * when nothing is running.
+     */
+    private settleInFlightRun() {
+        this.currentAbort?.abort();
+        this.currentAbort = undefined;
+        // Settle a parked confirm promise so its awaiter unblocks and its own
+        // finally can run (no orphaned promise).
+        this.resolveLargeQueryChoice('cancel');
+        this.pendingConfirm = undefined;
+        this.executing = false;
     }
 
 }

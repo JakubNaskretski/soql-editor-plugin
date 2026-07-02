@@ -3,6 +3,7 @@ import { SfCliService } from './sfCliService';
 import { MetadataProvider } from './metadataProvider';
 import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
 import { flattenRecordForDisplay } from './resultFlattening';
+import { QueryHistoryStore } from './queryHistory';
 
 /** Convert a 1-based line/column within `text` to a 0-based character offset. */
 export function lineColumnToOffset(text: string, line: number, column: number): number {
@@ -35,15 +36,17 @@ export class QueryExecutor {
     private sfCli: SfCliService;
     private metadata: MetadataProvider;
     private outputChannel: vscode.OutputChannel;
+    private history: QueryHistoryStore;
     private panel: vscode.WebviewPanel | undefined;
     private running = false;
     private queryDiagnostics: vscode.DiagnosticCollection;
     private disposables: vscode.Disposable[] = [];
 
-    constructor(sfCli: SfCliService, metadata: MetadataProvider, outputChannel: vscode.OutputChannel) {
+    constructor(sfCli: SfCliService, metadata: MetadataProvider, outputChannel: vscode.OutputChannel, history: QueryHistoryStore) {
         this.sfCli = sfCli;
         this.metadata = metadata;
         this.outputChannel = outputChannel;
+        this.history = history;
         this.queryDiagnostics = vscode.languages.createDiagnosticCollection('soql-query');
         this.disposables.push(
             this.queryDiagnostics,
@@ -65,6 +68,59 @@ export class QueryExecutor {
             return 5000;
         }
         return Math.max(0, Math.floor(configured));
+    }
+
+    /** Whether the editor path should route queries through the Tooling API
+     *  (`--use-tooling-api`), read from the `soqlEditor.useToolingApi` setting. */
+    private getUseToolingApi(): boolean {
+        return vscode.workspace
+            .getConfiguration('soqlEditor')
+            .get<boolean>('useToolingApi', false) === true;
+    }
+
+    /**
+     * Editor QuickPick over the current org's query history. Picking an entry
+     * inserts it into the active `.soql` editor (replacing the selection, or the
+     * whole document when there's no selection) so it can be run with Cmd+Enter.
+     */
+    async pickFromHistory(): Promise<void> {
+        const org = this.sfCli.getCurrentOrg();
+        if (!org) {
+            vscode.window.showWarningMessage('Select a Salesforce org first to see its query history.');
+            return;
+        }
+        const entries = this.history.list(org.username);
+        if (entries.length === 0) {
+            vscode.window.showInformationMessage(`No query history yet for ${org.alias}.`);
+            return;
+        }
+        const items = entries.map(e => ({
+            // Collapse whitespace for a compact single-line label; the full query
+            // (with newlines) is what gets inserted.
+            label: e.query.replace(/\s+/g, ' ').trim(),
+            detail: new Date(e.ts).toLocaleString(),
+            query: e.query,
+        }));
+        const picked = await vscode.window.showQuickPick(items, {
+            placeHolder: `Query history for ${org.alias} (most recent first)`,
+            matchOnDetail: false,
+        });
+        if (!picked) { return; }
+
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.languageId === 'soql') {
+            const range = editor.selection.isEmpty
+                ? new vscode.Range(
+                    editor.document.positionAt(0),
+                    editor.document.positionAt(editor.document.getText().length)
+                )
+                : editor.selection;
+            await editor.edit(builder => builder.replace(range, picked.query));
+        } else {
+            // No .soql editor focused — open the query in a fresh untitled one.
+            const doc = await vscode.workspace.openTextDocument({ content: picked.query, language: 'soql' });
+            await vscode.window.showTextDocument(doc);
+        }
     }
 
     async executeCurrentQuery() {
@@ -104,6 +160,11 @@ export class QueryExecutor {
         const docBase = regionStart + leadingWhitespace;
         const baseQueryLen = query.length;
 
+        // The user's original query (before any auto-appended LIMIT) is what gets
+        // recorded to history on a successful run.
+        const historyQuery = query;
+        const useToolingApi = this.getUseToolingApi();
+
         this.running = true;
         try {
             // Clear any stale query-error squiggle from a previous run.
@@ -113,12 +174,18 @@ export class QueryExecutor {
                 const countQuery = buildCountQuery(query);
                 if (countQuery) {
                     try {
-                        const countResult = await this.sfCli.executeQuery(countQuery);
+                        const countResult = await this.sfCli.executeQuery(countQuery, useToolingApi);
                         const totalRows = countResult.totalSize ?? countResult.records?.[0]?.expr0 ?? '?';
                         if (shouldPromptForCount(totalRows, this.getSlowQueryWarningThreshold())) {
+                            // Modal (not a dismissible toast): the v0.7.2 root cause
+                            // was a non-modal warning sliding unseen into the
+                            // notification center right after an org switch, wedging
+                            // the run at running=true with no visible choice. A modal
+                            // can't be buried and blocks until the user answers, and
+                            // its own X/Escape maps to "no choice" → clean return.
                             const choice = await vscode.window.showWarningMessage(
-                                `Query matches ${totalRows} records. Run it?`,
-                                { modal: false },
+                                `Query matches ${totalRows} records. How do you want to run it?`,
+                                { modal: true },
                                 'Add LIMIT 200',
                                 'Add LIMIT 2000',
                                 `Fetch all ${totalRows}`
@@ -138,10 +205,11 @@ export class QueryExecutor {
                     }
                 } else {
                     // No COUNT preflight possible (unrecognized FROM) and no LIMIT —
-                    // warn rather than silently running an unbounded query.
+                    // warn rather than silently running an unbounded query. Modal so
+                    // it can't be missed (same buried-toast wedge as above).
                     const choice = await vscode.window.showWarningMessage(
                         'Could not estimate this query\'s size and it has no LIMIT clause. Run anyway?',
-                        { modal: false },
+                        { modal: true },
                         'Add LIMIT 200',
                         'Run anyway'
                     );
@@ -164,10 +232,12 @@ export class QueryExecutor {
                     const controller = new AbortController();
                     const sub = token.onCancellationRequested(() => controller.abort());
                     try {
-                        const result = await this.sfCli.executeQuery(query, false, controller.signal);
+                        const result = await this.sfCli.executeQuery(query, useToolingApi, controller.signal);
                         if (this.sfCli.getCurrentOrg()?.username === orgAtStart) {
                             await this.metadata.reconcileSuccessfulQuery(query);
                         }
+                        // Record the successful run in this org's history.
+                        await this.history.add(orgAtStart, historyQuery);
                         this.queryDiagnostics.delete(targetDoc.uri); // success clears any prior error
                         this.showResults(query, result);
                     } catch (err: any) {

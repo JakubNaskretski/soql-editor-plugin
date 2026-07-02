@@ -33,11 +33,14 @@ export async function resolveRelationshipChain(
     relChain: readonly string[],
     metadata: MetadataProvider,
     isCancelled?: () => boolean,
+    /** Passed to each describe — a typing-path caller supplies a short timeout +
+     *  cancellation signal so chain resolution can't pile up slow subprocesses. */
+    describeOptions?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<SObjectDescribe | undefined> {
     let currentObj: string | undefined = rootObject;
     for (const relName of relChain) {
         if (isCancelled?.()) { return undefined; }
-        const desc = await metadata.describeSObject(currentObj);
+        const desc = await metadata.describeSObject(currentObj, describeOptions);
         if (!desc) { return undefined; }
         const field = desc.fields.find(
             f => f.relationshipName && f.relationshipName.toLowerCase() === relName.toLowerCase()
@@ -45,5 +48,5 @@ export async function resolveRelationshipChain(
         currentObj = field ? pickReferenceTarget(field.referenceTo) : undefined;
         if (!currentObj) { return undefined; }
     }
-    return metadata.describeSObject(currentObj);
+    return metadata.describeSObject(currentObj, describeOptions);
 }

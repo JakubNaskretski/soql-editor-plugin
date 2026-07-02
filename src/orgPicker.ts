@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { SfCliService, OrgInfo } from './sfCliService';
+import { setSharedOrg } from './kit/orgs';
 
 interface OrgQuickPickItem extends vscode.QuickPickItem {
     org: OrgInfo;
@@ -61,12 +62,45 @@ export class OrgPicker {
         if (picked) {
             const selectedOrg = picked.org;
             if (selectedOrg) {
-                this.sfCli.setCurrentOrg(selectedOrg);
-                this.updateLabel();
-                this.onOrgChangedEmitter.fire(selectedOrg);
+                this.applySelection(selectedOrg);
+                // Publish the choice to the shared, cross-plugin setting so the
+                // other family plugins retarget the same org. Fire-and-forget; the
+                // write is idempotent and our own onSharedOrgChange handler no-ops
+                // when the username already matches the current org.
+                void setSharedOrg(selectedOrg.username);
                 vscode.window.showInformationMessage(`SOQL Editor: Now targeting ${selectedOrg.alias}`);
             }
         }
+    }
+
+    /** Apply an org locally (sfCli + label + change event). Shared between the
+     *  manual picker, startup auto-select, and external shared-setting changes. */
+    private applySelection(org: OrgInfo) {
+        this.sfCli.setCurrentOrg(org);
+        this.updateLabel();
+        this.onOrgChangedEmitter.fire(org);
+    }
+
+    /**
+     * React to an external write of the shared `skrety.salesforce.targetOrg`
+     * setting (another family plugin, or the user editing settings): switch this
+     * plugin to that org. No-ops when it already matches the current org (so our
+     * own picker write doesn't cause a redundant re-switch) or when the username
+     * isn't among the authenticated orgs.
+     */
+    async applyExternalOrgUsername(username: string | undefined): Promise<void> {
+        if (!username) { return; }
+        if (this.sfCli.getCurrentOrg()?.username === username) { return; }
+        let orgs: OrgInfo[];
+        try {
+            orgs = await this.sfCli.listOrgs();
+        } catch {
+            return; // can't resolve — leave the current org untouched
+        }
+        const match = orgs.find(o => o.username.toLowerCase() === username.toLowerCase());
+        if (!match) { return; }
+        if (this.sfCli.getCurrentOrg()?.username === match.username) { return; }
+        this.applySelection(match);
     }
 
     async autoSelectDefault(preferredUsername?: string): Promise<void> {
@@ -77,9 +111,7 @@ export class OrgPicker {
                 : undefined;
             const startupOrg = preferredOrg || orgs.find(o => o.isDefault);
             if (startupOrg) {
-                this.sfCli.setCurrentOrg(startupOrg);
-                this.updateLabel();
-                this.onOrgChangedEmitter.fire(startupOrg);
+                this.applySelection(startupOrg);
             }
         } catch {
             // Silently fail on startup — user can pick manually

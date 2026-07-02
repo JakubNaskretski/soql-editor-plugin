@@ -90,6 +90,11 @@
       {
         "command": "soqlEditor.syncCommonMetadata",
         "title": "SOQL: Sync Common + Custom Objects (fast)"
+      },
+      {
+        "command": "soqlEditor.queryHistory",
+        "title": "SOQL: Query History",
+        "icon": "$(history)"
       }
     ],
     "keybindings": [
@@ -98,12 +103,23 @@
         "key": "ctrl+enter",
         "mac": "cmd+enter",
         "when": "editorLangId == soql"
+      },
+      {
+        "command": "soqlEditor.queryHistory",
+        "key": "ctrl+alt+h",
+        "mac": "cmd+alt+h",
+        "when": "editorLangId == soql"
       }
     ],
     "menus": {
       "editor/title": [
         {
           "command": "soqlEditor.executeQuery",
+          "when": "editorLangId == soql",
+          "group": "navigation"
+        },
+        {
+          "command": "soqlEditor.queryHistory",
           "when": "editorLangId == soql",
           "group": "navigation"
         }
@@ -149,6 +165,11 @@
           "type": "boolean",
           "default": true,
           "description": "On startup, append '.soql-cache' to each workspace folder's .git/info/exclude so the legacy cache folder is not tracked. Disable if you'd rather manage your own exclude rules."
+        },
+        "soqlEditor.useToolingApi": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run editor (.soql file) queries against the Tooling API (`sf data query --use-tooling-api`), which exposes setup/metadata objects like ApexClass, CustomField, and FlowDefinition. The sidebar panel has its own per-panel Tooling toggle."
         }
       }
     }

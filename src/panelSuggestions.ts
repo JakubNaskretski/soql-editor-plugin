@@ -1,5 +1,5 @@
 /** Computes context-aware autocomplete suggestions for the sidebar editor. */
-import { MetadataProvider } from './metadataProvider';
+import { MetadataProvider, typingDescribeOptions } from './metadataProvider';
 import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset, ScopedFromInfo } from './soqlParser';
 import { resolveRelationshipChain } from './relationshipChain';
 import { FieldUsage, isFieldUsableIn } from './soqlCatalog';
@@ -322,7 +322,9 @@ export async function getSuggestions(
                 // Account.Industry on Contact) to the target object's field so its
                 // picklist values are offered, not the base object's.
                 const segments = ctx.field.split('.');
-                const desc = await resolveRelationshipChain(obj, segments.slice(0, -1), metadata);
+                const desc = await resolveRelationshipChain(
+                    obj, segments.slice(0, -1), metadata, undefined, typingDescribeOptions()
+                );
                 if (desc) {
                     const leaf = segments[segments.length - 1].toLowerCase();
                     const field = desc.fields.find(f => f.name.toLowerCase() === leaf);
@@ -422,7 +424,7 @@ export async function getSubqueryFromSuggestions(
         return [];
     }
 
-    const parentDescribe = await metadata.describeSObject(parentObj);
+    const parentDescribe = await metadata.describeSObject(parentObj, typingDescribeOptions());
     if (!parentDescribe) {
         return [];
     }
@@ -518,7 +520,7 @@ async function resolveScopeObject(
         return scoped.fromName;
     }
 
-    const parentDescribe = await metadata.describeSObject(parentObj);
+    const parentDescribe = await metadata.describeSObject(parentObj, typingDescribeOptions());
     const childRel = parentDescribe?.childRelationships.find(rel =>
         rel.relationshipName?.toLowerCase() === scoped.fromName.toLowerCase()
     );
@@ -533,7 +535,9 @@ async function getRelationshipFieldSuggestions(
     metadata: MetadataProvider,
     usage: FieldUsage,
 ): Promise<Suggestion[]> {
-    const resolved = await resolveRelationshipChain(obj, dotParts.slice(0, -1), metadata);
+    const resolved = await resolveRelationshipChain(
+        obj, dotParts.slice(0, -1), metadata, undefined, typingDescribeOptions()
+    );
     if (!resolved) { return []; }
 
     const fieldPartial = dotParts[dotParts.length - 1].toLowerCase();
@@ -577,7 +581,7 @@ async function getDirectFieldSuggestions(
     metadata: MetadataProvider,
     usage: FieldUsage,
 ): Promise<Suggestion[]> {
-    const desc = await metadata.describeSObject(obj);
+    const desc = await metadata.describeSObject(obj, typingDescribeOptions());
     if (!desc) { return []; }
 
     const lower = partial.toLowerCase();
