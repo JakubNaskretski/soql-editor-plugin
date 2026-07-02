@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0
+
+- **Query history.** Your last 50 queries are remembered per org — recall them
+  from the History dropdown in the panel, or from the editor with
+  `Cmd/Ctrl+Alt+H`.
+- **Tooling API toggle.** A panel checkbox (and the `soqlEditor.useToolingApi`
+  setting for `.soql` files) runs queries against the Tooling API — for objects
+  like `ApexCodeCoverage` that the regular API can't see.
+- Results now always land on the tab that ran the query, even if you switch
+  tabs while it's running.
+- The large-result prompt for editor-run queries is a proper dialog, so a run
+  can no longer appear stuck behind a buried notification.
+- Closing the panel mid-prompt no longer blocks all future runs until reload,
+  and autocomplete no longer piles up long-running CLI calls while you type.
+- The selected org is now shared with the other Skrety Salesforce extensions —
+  switch once, it applies everywhere.
+- Windows: the `sf` launcher is now resolved correctly.
+
 ## 0.7.2
 
 - Fixed the sidebar query getting stuck on "Running…" after switching org. The
