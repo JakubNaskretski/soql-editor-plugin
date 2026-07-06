@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.1
+
+- Fixed custom objects disappearing from autocomplete over time. Once the
+  cached org object list expired (default: 7 days), the next field lookup
+  could quietly replace it with a near-empty list, and the extension then
+  stopped re-fetching the real one — `FROM` no longer offered custom objects
+  and their fields never suggested. Affected caches now heal themselves; to
+  repair immediately, run **Load MD → Sync All Objects** (or Clear Cache).
+
 ## 0.8.0
 
 - **Query history.** Your last 50 queries are remembered per org — recall them
