@@ -299,18 +299,22 @@ body {
     z-index: 2;
 }
 .results-table {
-    width: 100%; border-collapse: collapse;
+    border-collapse: collapse;
 }
 .results-table th, .results-table td {
     border: 1px solid var(--vscode-panel-border);
     padding: 3px 6px; text-align: left;
     white-space: nowrap;
     font-size: 12px;
+    max-width: 50ch;
+    overflow: hidden; text-overflow: ellipsis;
 }
 .results-table th {
     background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background));
     position: sticky; top: 28px;
     font-weight: 600; z-index: 1;
+    resize: horizontal;
+    min-width: 4ch;
 }
 .results-table tr:hover { background: var(--vscode-list-hoverBackground); }
 .sf-id-link {

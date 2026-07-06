@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.2
+
+- Results columns no longer stretch to fill the panel — they now size to their
+  content, very long values are truncated with an ellipsis (hover to see the
+  full value), and column widths can be adjusted by dragging the grip in the
+  bottom-right corner of a column header.
+
 ## 0.8.1
 
 - Fixed custom objects disappearing from autocomplete over time. Once the
