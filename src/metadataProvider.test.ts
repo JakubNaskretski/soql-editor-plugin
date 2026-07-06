@@ -176,6 +176,13 @@ describe('MetadataProvider (org-first cache strategy)', () => {
         });
         fs.mkdirSync(cacheDir, { recursive: true });
         provider.setCurrentOrgCacheSourceState('org');
+        // Appends require a valid CLI-seeded list on disk (a lone describe must
+        // never create one — see the expired-list poisoning test).
+        fs.writeFileSync(
+            path.join(cacheDir, '_objectList.json'),
+            JSON.stringify({ objects: ['Contact'], _cachedAt: Date.now() }),
+            'utf-8'
+        );
 
         await provider.reconcileSuccessfulQuery('SELECT Id, Name FROM Account');
 
@@ -184,6 +191,7 @@ describe('MetadataProvider (org-first cache strategy)', () => {
 
         const objectList = JSON.parse(fs.readFileSync(path.join(cacheDir, '_objectList.json'), 'utf-8'));
         expect(objectList.objects).toContain('Account');
+        expect(objectList.objects).toContain('Contact');
         fs.rmSync(tmpRoot, { recursive: true, force: true });
     });
 
@@ -295,6 +303,70 @@ describe('MetadataProvider (org-first cache strategy)', () => {
         expect(described).toContain('vlocity_cmt__Pricing__e');
         expect(described).toContain('ns__External__x');
         expect(described).toContain('My_Big__b');
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('does not seed or replace the object list from a single describe (expired-list poisoning)', async () => {
+        vscodeMockState.cacheExpiryDays = 7;
+        const fullList = ['Account', 'Contact', 'MyCustom__c'];
+        const { provider, cacheDir, tmpRoot } = createProvider({
+            objectList: fullList,
+            describes: { account: makeDescribe('Account', ['Id', 'Name']) },
+        });
+
+        // A complete org list that has aged past the expiry window.
+        fs.mkdirSync(cacheDir, { recursive: true });
+        const listPath = path.join(cacheDir, '_objectList.json');
+        const staleCachedAt = Date.now() - 8 * 24 * 60 * 60 * 1000;
+        fs.writeFileSync(
+            listPath,
+            JSON.stringify({ objects: fullList, _cachedAt: staleCachedAt }),
+            'utf-8'
+        );
+
+        // On-demand describe: cache miss → live CLI → saveToDiskCache → list append.
+        await provider.describeSObject('Account');
+
+        // The expired file must be left alone — before the fix it was replaced by
+        // a fresh 1-name list, which then blocked the CLI re-fetch forever.
+        const untouched = JSON.parse(fs.readFileSync(listPath, 'utf-8'));
+        expect(untouched.objects).toEqual(fullList);
+        expect(untouched._cachedAt).toBe(staleCachedAt);
+
+        // With no valid disk list, getObjectList re-fetches the real list from
+        // the CLI and persists it fresh (self-heal).
+        const list = await provider.getObjectList();
+        expect(list).toEqual([...fullList].sort());
+        const healed = JSON.parse(fs.readFileSync(listPath, 'utf-8'));
+        expect(healed.objects).toEqual(fullList);
+        expect(healed._cachedAt).toBeGreaterThan(staleCachedAt);
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('syncAllMetadata persists the fetched CLI object list to disk', async () => {
+        const { provider, cacheDir, tmpRoot } = createProvider({
+            objectList: ['Account', 'MyCustom__c'],
+            describes: {
+                account: makeDescribe('Account', ['Id']),
+                mycustom__c: makeDescribe('MyCustom__c', ['Id']),
+            },
+        });
+
+        // Simulate the poisoned state: a valid-looking but partial list on disk.
+        fs.mkdirSync(cacheDir, { recursive: true });
+        const listPath = path.join(cacheDir, '_objectList.json');
+        fs.writeFileSync(
+            listPath,
+            JSON.stringify({ objects: ['Account'], _cachedAt: Date.now() }),
+            'utf-8'
+        );
+
+        const progress = { report: vi.fn() };
+        const token = { isCancellationRequested: false };
+        await provider.syncAllMetadata(progress as any, token as any);
+
+        const raw = JSON.parse(fs.readFileSync(listPath, 'utf-8'));
+        expect(raw.objects).toEqual(['Account', 'MyCustom__c']);
         fs.rmSync(tmpRoot, { recursive: true, force: true });
     });
 });
