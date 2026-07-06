@@ -633,7 +633,11 @@ export class MetadataProvider {
     private addObjectToDiskObjectList(objectName: string) {
         const normalizedName = normalizeSObjectApiName(objectName);
         if (!normalizedName) { return; }
-        const existing = this.loadObjectListFromDisk() || [];
+        const existing = this.loadObjectListFromDisk();
+        // No valid (present, unexpired) list on disk: never seed one from a single
+        // name. A 1-name file reads as a fresh, complete org list and permanently
+        // stops getObjectList() from re-fetching the real list via the CLI.
+        if (!existing) { return; }
         if (existing.some(name => name.toLowerCase() === normalizedName.toLowerCase())) {
             return;
         }
@@ -684,6 +688,9 @@ export class MetadataProvider {
                 attempted: 0,
             };
         }
+        // Persist the fresh CLI list now — it also repairs a stale/partial
+        // _objectList.json that would otherwise short-circuit getObjectList().
+        this.saveObjectListToDisk(objectNames);
         const toSync = objectNames.filter(n => !this.isOnDisk(n));
         const skipped = objectNames.length - toSync.length;
         const workers = this.getSyncConcurrency();
