@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.3
+
+- Autocomplete and error-checking racing on a not-yet-cached object now share one
+  `sf sobject describe` call instead of spawning duplicate processes; the object
+  list lookup is deduplicated the same way.
+- Metadata syncs no longer run twice in parallel. Triggering the same sync again
+  joins the one already running, and a different sync waits its turn — no more
+  stacked sync progress notifications doing duplicate work.
+
 ## 0.8.2
 
 - Results columns no longer stretch to fill the panel — they now size to their

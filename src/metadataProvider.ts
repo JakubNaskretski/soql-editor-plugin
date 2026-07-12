@@ -125,10 +125,25 @@ export class MetadataProvider {
         return Math.min(3, Math.max(0, normalized));
     }
 
+    /** In-flight object-list load, shared so completion and a panel suggestion
+     *  request racing on a cold cache spawn one `sf sobject list`, not two. */
+    private objectListInflight?: Promise<string[]>;
+
     /**
      * Get object list from selected-org cache, then CLI, then fallback list.
      */
-    async getObjectList(): Promise<string[]> {
+    getObjectList(): Promise<string[]> {
+        if (this.objectListInflight) { return this.objectListInflight; }
+        const run: Promise<string[]> = this.doGetObjectList().finally(() => {
+            // Identity check: an org switch may have orphaned this run and a fresh
+            // one may already occupy the slot — never wipe the successor's.
+            if (this.objectListInflight === run) { this.objectListInflight = undefined; }
+        });
+        this.objectListInflight = run;
+        return run;
+    }
+
+    private async doGetObjectList(): Promise<string[]> {
         if (this.objectListCache && Date.now() < this.objectListCache.expiresAt) {
             return this.objectListCache.value;
         }
@@ -225,20 +240,44 @@ export class MetadataProvider {
         // Already cancelled before the (slow) live describe — bail without shelling out.
         if (options?.signal?.aborted) { return undefined; }
 
-        // 3. Try live CLI describe
-        const live = await this.sfCli.describeSObject(normalizedName, {
-            signal: options?.signal,
-            timeoutMs: options?.timeoutMs,
+        // 3. Try live CLI describe — shared per object: diagnostics and completion
+        //    both miss the cold cache for the same FROM object at the same moment,
+        //    which used to spawn two identical `sf sobject describe` subprocesses.
+        //    Join rule: a run driven by its initiator's AbortSignal can be cancelled
+        //    mid-keystroke and resolve undefined for every joiner — and a signal-less
+        //    caller (diagnostics, panel fetch) treats undefined as "object doesn't
+        //    exist". So signal-less callers never join an abortable run: they start
+        //    their own non-abortable one and take over the slot, becoming the safer
+        //    join target for everyone after them.
+        const inflight = this.describeInflight.get(normalizedName);
+        if (inflight && (options?.signal || !inflight.abortable)) { return inflight.promise; }
+        const run = (async (): Promise<SObjectDescribe | undefined> => {
+            const live = await this.sfCli.describeSObject(normalizedName, {
+                signal: options?.signal,
+                timeoutMs: options?.timeoutMs,
+            });
+            if (live) {
+                this.saveToDiskCache(normalizedName, live);
+                this.setCurrentOrgCacheSourceState('org');
+                this.removePlaceholderObject(normalizedName);
+                return live;
+            }
+            return undefined;
+        })().finally(() => {
+            // Identity check: an org switch (clearInMemoryCaches) or a non-abortable
+            // takeover may have replaced this entry — never delete a successor's.
+            if (this.describeInflight.get(normalizedName)?.promise === run) {
+                this.describeInflight.delete(normalizedName);
+            }
         });
-        if (live) {
-            this.saveToDiskCache(normalizedName, live);
-            this.setCurrentOrgCacheSourceState('org');
-            this.removePlaceholderObject(normalizedName);
-            return live;
-        }
-
-        return undefined;
+        this.describeInflight.set(normalizedName, { promise: run, abortable: !!options?.signal });
+        return run;
     }
+
+    /** Live describes in flight, keyed by normalized object name (cleared on settle
+     *  and on org switch). `abortable` marks a run governed by its initiator's
+     *  AbortSignal — see the join rule in describeSObject. */
+    private describeInflight = new Map<string, { promise: Promise<SObjectDescribe | undefined>; abortable: boolean }>();
 
     // ── disk cache ─────────────────────────────────────────────────────
 
@@ -665,11 +704,34 @@ export class MetadataProvider {
         } catch { return false; }
     }
 
+    /** The sync currently running (or queued). One worker pool at a time: the
+     *  palette command, the panel quick pick and the startup readiness prompt can
+     *  all trigger a sync in the same window — an identical request joins the
+     *  running one, a different kind queues behind it instead of racing it. */
+    private syncInflight?: { kind: 'all' | 'common'; promise: Promise<SyncRunStats> };
+
+    private runExclusiveSync(kind: 'all' | 'common', run: () => Promise<SyncRunStats>): Promise<SyncRunStats> {
+        const current = this.syncInflight;
+        if (current?.kind === kind) { return current.promise; }
+        const promise = (current ? current.promise.then(() => undefined, () => undefined) : Promise.resolve(undefined))
+            .then(() => run())
+            .finally(() => { if (this.syncInflight?.promise === promise) { this.syncInflight = undefined; } });
+        this.syncInflight = { kind, promise };
+        return promise;
+    }
+
     /**
      * Sync all object metadata from the org to disk cache.
      * Skips objects already cached on disk.
      */
-    async syncAllMetadata(
+    syncAllMetadata(
+        progress: vscode.Progress<{ message?: string; increment?: number }>,
+        token: vscode.CancellationToken
+    ): Promise<SyncRunStats> {
+        return this.runExclusiveSync('all', () => this.doSyncAllMetadata(progress, token));
+    }
+
+    private async doSyncAllMetadata(
         progress: vscode.Progress<{ message?: string; increment?: number }>,
         token: vscode.CancellationToken
     ): Promise<SyncRunStats> {
@@ -723,7 +785,14 @@ export class MetadataProvider {
     /**
      * Sync only the most commonly used standard objects.
      */
-    async syncCommonMetadata(
+    syncCommonMetadata(
+        progress: vscode.Progress<{ message?: string; increment?: number }>,
+        token: vscode.CancellationToken
+    ): Promise<SyncRunStats> {
+        return this.runExclusiveSync('common', () => this.doSyncCommonMetadata(progress, token));
+    }
+
+    private async doSyncCommonMetadata(
         progress: vscode.Progress<{ message?: string; increment?: number }>,
         token: vscode.CancellationToken
     ): Promise<SyncRunStats> {
@@ -897,6 +966,11 @@ export class MetadataProvider {
      */
     clearInMemoryCaches() {
         this.objectListCache = undefined;
+        // Also orphan any in-flight loads: callers after an org switch must spawn
+        // fresh CLI calls, never join a run still answering for the previous org.
+        // (Identity-checked finallys make the orphaned runs' cleanup a no-op.)
+        this.objectListInflight = undefined;
+        this.describeInflight.clear();
     }
 
     clearDiskCache() {
