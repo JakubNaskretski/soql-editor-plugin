@@ -369,6 +369,60 @@ describe('MetadataProvider (org-first cache strategy)', () => {
         expect(raw.objects).toEqual(['Account', 'MyCustom__c']);
         fs.rmSync(tmpRoot, { recursive: true, force: true });
     });
+
+    it('writes a describe to the current org cache when the org is stable', async () => {
+        const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'soql-md-stable-'));
+        const orgA = { alias: 'a', username: 'a@example.com', instanceUrl: '', isDefault: true };
+        const describeAccount = makeDescribe('Account', ['Id', 'Name']);
+        const inMemory = new Map<string, SObjectDescribe>();
+        const sfCli = {
+            getCurrentOrg: () => orgA,
+            getCachedDescribe: (n: string) => inMemory.get(n.toLowerCase()),
+            setCachedDescribe: (n: string, d: SObjectDescribe) => { inMemory.set(n.toLowerCase(), d); },
+            describeSObject: vi.fn(async () => describeAccount),
+            getObjectList: vi.fn(async () => []),
+            getLastObjectListError: () => undefined,
+            clearCache: vi.fn(),
+        };
+        const provider = new MetadataProvider(sfCli as any, { appendLine: vi.fn() } as any, tmpRoot);
+
+        await provider.describeSObject('Account');
+
+        const aFile = path.join(tmpRoot, 'cache', 'a@example.com'.replace(/[^a-zA-Z0-9_.-]/g, '_'), 'Account.json');
+        expect(fs.existsSync(aFile)).toBe(true);
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('drops the describe cache write when the org switched mid-describe (no cross-org poisoning)', async () => {
+        const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'soql-md-switch-'));
+        const orgA = { alias: 'a', username: 'a@example.com', instanceUrl: '', isDefault: true };
+        const orgB = { alias: 'b', username: 'b@example.com', instanceUrl: '', isDefault: true };
+        let current = orgA;
+        const describeAccount = makeDescribe('Account', ['Id', 'Name']);
+        const inMemory = new Map<string, SObjectDescribe>();
+        const sfCli = {
+            getCurrentOrg: () => current,
+            getCachedDescribe: (n: string) => inMemory.get(n.toLowerCase()),
+            setCachedDescribe: (n: string, d: SObjectDescribe) => { inMemory.set(n.toLowerCase(), d); },
+            // The live describe (issued under org A) resolves only after a switch to B.
+            describeSObject: vi.fn(async () => { current = orgB; return describeAccount; }),
+            getObjectList: vi.fn(async () => []),
+            getLastObjectListError: () => undefined,
+            clearCache: vi.fn(),
+        };
+        const provider = new MetadataProvider(sfCli as any, { appendLine: vi.fn() } as any, tmpRoot);
+
+        const result = await provider.describeSObject('Account');
+        expect(result).toEqual(describeAccount); // the original caller still gets org A's data
+
+        const key = (u: string) => u.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        const aFile = path.join(tmpRoot, 'cache', key('a@example.com'), 'Account.json');
+        const bFile = path.join(tmpRoot, 'cache', key('b@example.com'), 'Account.json');
+        // The late describe poisons neither org's on-disk cache.
+        expect(fs.existsSync(bFile)).toBe(false);
+        expect(fs.existsSync(aFile)).toBe(false);
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
 });
 
 describe('typingDescribeOptions', () => {

@@ -14,6 +14,9 @@ export class OrgPicker {
     private sfCli: SfCliService;
     private onOrgChangedEmitter = new vscode.EventEmitter<OrgInfo>();
     public readonly onOrgChanged = this.onOrgChangedEmitter.event;
+    /** Monotonic token so out-of-order external-switch resolutions can't revert a
+     *  newer choice: each external event captures it and bails if superseded. */
+    private applyGeneration = 0;
 
     constructor(sfCli: SfCliService) {
         this.sfCli = sfCli;
@@ -62,45 +65,86 @@ export class OrgPicker {
         if (picked) {
             const selectedOrg = picked.org;
             if (selectedOrg) {
-                this.applySelection(selectedOrg);
-                // Publish the choice to the shared, cross-plugin setting so the
-                // other family plugins retarget the same org. Fire-and-forget; the
-                // write is idempotent and our own onSharedOrgChange handler no-ops
-                // when the username already matches the current org.
-                void setSharedOrg(selectedOrg.username);
+                // User-initiated pick: applySelection publishes the choice to the
+                // shared cross-plugin setting so the other family plugins retarget
+                // the same org. This is the ONLY path allowed to write it.
+                this.applySelection(selectedOrg, true);
                 vscode.window.showInformationMessage(`SOQL Editor: Now targeting ${selectedOrg.alias}`);
             }
         }
     }
 
     /** Apply an org locally (sfCli + label + change event). Shared between the
-     *  manual picker, startup auto-select, and external shared-setting changes. */
-    private applySelection(org: OrgInfo) {
+     *  manual picker, startup auto-select, and external shared-setting changes.
+     *
+     *  `userInitiated` gates the one cross-plugin side effect: only a manual pick
+     *  publishes to the shared `skrety.salesforce.targetOrg` setting. Programmatic
+     *  applies (startup auto-select, following an external change) stay local, so
+     *  merely activating this plugin — or following the family — never writes the
+     *  shared setting back and silently retargets every sibling. */
+    private applySelection(org: OrgInfo, userInitiated: boolean) {
         this.sfCli.setCurrentOrg(org);
         this.updateLabel();
+        if (userInitiated) {
+            // Fire-and-forget; the write is idempotent and our own
+            // onSharedOrgChange handler no-ops when the username already matches.
+            void setSharedOrg(org.username);
+        }
         this.onOrgChangedEmitter.fire(org);
+    }
+
+    /** Build a minimal OrgInfo from a bare username so this plugin can still
+     *  follow the family to an org we can't enrich — auth known only to another
+     *  plugin, or a transient `sf org list` failure. Unknown flags are treated
+     *  conservatively (not the CLI default). */
+    private minimalOrg(username: string): OrgInfo {
+        return { alias: username, username, instanceUrl: '', isDefault: false };
     }
 
     /**
      * React to an external write of the shared `skrety.salesforce.targetOrg`
      * setting (another family plugin, or the user editing settings): switch this
      * plugin to that org. No-ops when it already matches the current org (so our
-     * own picker write doesn't cause a redundant re-switch) or when the username
-     * isn't among the authenticated orgs.
+     * own picker write doesn't cause a redundant re-switch). Applies locally only
+     * — an external change must never be written back to the shared setting.
      */
     async applyExternalOrgUsername(username: string | undefined): Promise<void> {
-        if (!username) { return; }
+        // Monotonic generation: rapid external A→B→C switches each fire this
+        // handler. Capture a token now and re-check it after the async listOrgs so
+        // a superseded resolution bails instead of clobbering a newer choice
+        // (out-of-order listOrgs completions could otherwise land B after C).
+        const gen = ++this.applyGeneration;
+
+        // External clear (the shared setting was emptied): drop the current org and
+        // show the no-org state rather than silently staying on the org every
+        // sibling just moved off.
+        if (!username) {
+            this.sfCli.clearCurrentOrg();
+            this.updateLabel();
+            return;
+        }
         if (this.sfCli.getCurrentOrg()?.username === username) { return; }
+
         let orgs: OrgInfo[];
         try {
             orgs = await this.sfCli.listOrgs();
         } catch {
-            return; // can't resolve — leave the current org untouched
+            // Couldn't enrich the org — follow the family with a minimal OrgInfo
+            // rather than stranding this plugin on the previous org. Skip if a
+            // newer switch already superseded this one.
+            if (gen === this.applyGeneration) {
+                this.applySelection(this.minimalOrg(username), false);
+            }
+            return;
         }
-        const match = orgs.find(o => o.username.toLowerCase() === username.toLowerCase());
-        if (!match) { return; }
+        if (gen !== this.applyGeneration) { return; } // a newer switch won the race
+
+        // Fall back to a minimal OrgInfo when the username isn't in the list (auth
+        // known only to another plugin) so we still follow the family.
+        const match = orgs.find(o => o.username.toLowerCase() === username.toLowerCase())
+            ?? this.minimalOrg(username);
         if (this.sfCli.getCurrentOrg()?.username === match.username) { return; }
-        this.applySelection(match);
+        this.applySelection(match, false);
     }
 
     async autoSelectDefault(preferredUsername?: string): Promise<void> {
@@ -111,7 +155,8 @@ export class OrgPicker {
                 : undefined;
             const startupOrg = preferredOrg || orgs.find(o => o.isDefault);
             if (startupOrg) {
-                this.applySelection(startupOrg);
+                // Programmatic (activation): apply locally, never write shared.
+                this.applySelection(startupOrg, false);
             }
         } catch {
             // Silently fail on startup — user can pick manually

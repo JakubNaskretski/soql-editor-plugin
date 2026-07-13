@@ -188,3 +188,57 @@ describe('SfCliService.getObjectList', () => {
         await expect(svc.getObjectList()).resolves.toEqual(['Account', 'Contact']);
     });
 });
+
+describe('SfCliService.listOrgs', () => {
+    beforeEach(() => {
+        execFileMock.mockReset();
+    });
+
+    it('skips the per-org connection probe so a flaky org is not dropped', async () => {
+        execFileMock.mockImplementation((_file, _args, _opts, cb) =>
+            cb(null, JSON.stringify({ result: { nonScratchOrgs: [] } }), '')
+        );
+        const svc = makeService();
+
+        await svc.listOrgs();
+
+        expect(execFileMock.mock.calls[0][1]).toEqual(['org', 'list', '--skip-connection-status', '--json']);
+    });
+});
+
+describe('SfCliService.describeSObject org-switch cache guard', () => {
+    const describeJson = JSON.stringify({
+        status: 0,
+        result: { name: 'Account', label: 'Account', fields: [], childRelationships: [] },
+    });
+
+    beforeEach(() => {
+        execFileMock.mockReset();
+    });
+
+    it('does not cache a describe under the new org when the org switched mid-describe', async () => {
+        const svc = makeService();
+        svc.setCurrentOrg(TEST_ORG); // org A
+        const OTHER: OrgInfo = { alias: 'other', username: 'other@example.com', instanceUrl: '', isDefault: false };
+        execFileMock.mockImplementation((_file, _args, _opts, cb) => {
+            // A switch to another org lands before the describe resolves.
+            svc.setCurrentOrg(OTHER);
+            cb(null, describeJson, '');
+        });
+
+        const result = await svc.describeSObject('Account');
+
+        expect(result?.name).toBe('Account'); // the original caller still gets the data
+        expect(svc.getCachedDescribe('Account')).toBeUndefined(); // but it is not cached under org B
+    });
+
+    it('caches a describe when the org is unchanged', async () => {
+        const svc = makeService();
+        svc.setCurrentOrg(TEST_ORG);
+        execFileMock.mockImplementation((_file, _args, _opts, cb) => cb(null, describeJson, ''));
+
+        await svc.describeSObject('Account');
+
+        expect(svc.getCachedDescribe('Account')?.name).toBe('Account');
+    });
+});
