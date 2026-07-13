@@ -148,13 +148,21 @@ export class MetadataProvider {
             return this.objectListCache.value;
         }
 
+        // Capture the org this load runs against. A switch mid-`sf sobject list`
+        // must not persist org A's list into org B's caches — the disk write
+        // resolves getCacheDir() at write time, and objectListCache is shared
+        // across orgs with a 30s TTL.
+        const orgAtStart = this.sfCli.getCurrentOrg()?.username;
+
         // Try disk-cached object list first
         let orgObjects = this.loadObjectListFromDisk();
         if (!orgObjects) {
             orgObjects = await this.sfCli.getObjectList();
             if (orgObjects.length > 0) {
-                this.saveObjectListToDisk(orgObjects);
-                this.setCurrentOrgCacheSourceState('org');
+                if (this.sfCli.getCurrentOrg()?.username === orgAtStart) {
+                    this.saveObjectListToDisk(orgObjects);
+                    this.setCurrentOrgCacheSourceState('org');
+                }
             } else {
                 // Surface CLI failure once so the user understands why autocomplete
                 // is showing only the static fallback list instead of org-specific
@@ -170,10 +178,15 @@ export class MetadataProvider {
         }
 
         const list = Array.from(new Set(orgObjects)).sort();
-        this.objectListCache = {
-            value: list,
-            expiresAt: Date.now() + 30_000,
-        };
+        // Only populate the shared in-memory cache while still on the org we loaded
+        // for; otherwise hand the list back to this caller without caching it under
+        // the new org (a fresh load runs for the new org).
+        if (this.sfCli.getCurrentOrg()?.username === orgAtStart) {
+            this.objectListCache = {
+                value: list,
+                expiresAt: Date.now() + 30_000,
+            };
+        }
         return list;
     }
 
@@ -251,15 +264,23 @@ export class MetadataProvider {
         //    join target for everyone after them.
         const inflight = this.describeInflight.get(normalizedName);
         if (inflight && (options?.signal || !inflight.abortable)) { return inflight.promise; }
+        // Capture the org this run describes against. getCacheDir() resolves the
+        // CURRENT org at write time, so a switch during the live describe would
+        // otherwise persist org A's fields into org B's on-disk cache.
+        const describeOrg = this.sfCli.getCurrentOrg()?.username;
         const run = (async (): Promise<SObjectDescribe | undefined> => {
             const live = await this.sfCli.describeSObject(normalizedName, {
                 signal: options?.signal,
                 timeoutMs: options?.timeoutMs,
             });
             if (live) {
-                this.saveToDiskCache(normalizedName, live);
-                this.setCurrentOrgCacheSourceState('org');
-                this.removePlaceholderObject(normalizedName);
+                // Still on the same org? Otherwise hand the data back to the caller
+                // but drop every cache write — none of it belongs to the new org.
+                if (this.sfCli.getCurrentOrg()?.username === describeOrg) {
+                    this.saveToDiskCache(normalizedName, live);
+                    this.setCurrentOrgCacheSourceState('org');
+                    this.removePlaceholderObject(normalizedName);
+                }
                 return live;
             }
             return undefined;

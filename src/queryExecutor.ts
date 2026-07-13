@@ -221,6 +221,9 @@ export class QueryExecutor {
             // Capture the org now so a mid-query org switch doesn't make us
             // reconcile metadata against (and pollute the cache of) the new org.
             const orgAtStart = this.sfCli.getCurrentOrg()?.username;
+            // Capture the label too so the results panel stays attributed to the
+            // org the query ran against, even if the user switches before it renders.
+            const orgLabelAtStart = this.sfCli.getCurrentOrg()?.alias ?? orgAtStart;
 
             await vscode.window.withProgress(
                 {
@@ -239,7 +242,7 @@ export class QueryExecutor {
                         // Record the successful run in this org's history.
                         await this.history.add(orgAtStart, historyQuery);
                         this.queryDiagnostics.delete(targetDoc.uri); // success clears any prior error
-                        this.showResults(query, result);
+                        this.showResults(query, result, orgLabelAtStart);
                     } catch (err: any) {
                         if (token.isCancellationRequested) { return; } // user cancelled — not an error
                         this.reportQueryError(err, {
@@ -316,14 +319,16 @@ export class QueryExecutor {
         return new vscode.Range(startPos, endPos);
     }
 
-    private showResults(query: string, result: any) {
+    private showResults(query: string, result: any, orgLabel?: string) {
         const records: any[] = result.records || [];
         const totalSize: number = result.totalSize || records.length;
         const truncated = records.length > QueryExecutor.MAX_RENDER_ROWS;
         const displayedRecords = truncated ? records.slice(0, QueryExecutor.MAX_RENDER_ROWS) : records;
 
         if (displayedRecords.length === 0) {
-            vscode.window.showInformationMessage(`Query returned 0 records`);
+            vscode.window.showInformationMessage(
+                orgLabel ? `Query returned 0 records (${orgLabel})` : 'Query returned 0 records'
+            );
             return;
         }
 
@@ -356,7 +361,7 @@ export class QueryExecutor {
         }
 
         this.panel.title = `SOQL Results (${totalSize} records)`;
-        this.panel.webview.html = this.buildResultsHtml(query, columnList, displayRows, totalSize, truncated);
+        this.panel.webview.html = this.buildResultsHtml(query, columnList, displayRows, totalSize, truncated, orgLabel);
         this.panel.reveal(vscode.ViewColumn.Two, true);
     }
 
@@ -365,7 +370,8 @@ export class QueryExecutor {
         columns: string[],
         records: any[],
         totalSize: number,
-        truncated: boolean
+        truncated: boolean,
+        orgLabel?: string
     ): string {
         const escapeHtml = (str: string) =>
             String(str)
@@ -452,7 +458,7 @@ export class QueryExecutor {
 </head>
 <body>
     <div class="query">${escapeHtml(query)}</div>
-    <div class="summary">${totalSize} record${totalSize !== 1 ? 's' : ''} returned${truncated ? ` (showing first ${QueryExecutor.MAX_RENDER_ROWS})` : ''}</div>
+    <div class="summary">${totalSize} record${totalSize !== 1 ? 's' : ''} returned${truncated ? ` (showing first ${QueryExecutor.MAX_RENDER_ROWS})` : ''}${orgLabel ? ` &middot; org: ${escapeHtml(orgLabel)}` : ''}</div>
     <div class="table-wrapper">
         <table>
             <thead><tr>${headerCells}</tr></thead>

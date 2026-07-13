@@ -169,6 +169,13 @@ export class SfCliService {
         this.clearCache();
     }
 
+    /** Clear the current org (e.g. the shared cross-plugin setting was emptied
+     *  externally). Drops the per-org caches so the next selection starts clean. */
+    clearCurrentOrg() {
+        this.currentOrg = undefined;
+        this.clearCache();
+    }
+
     clearCache() {
         this.metadataCache.clear();
         this.objectListCache = undefined;
@@ -191,7 +198,12 @@ export class SfCliService {
      */
     async listOrgs(): Promise<OrgInfo[]> {
         try {
-            const result = await this.runCliAsync(['org', 'list', '--json']);
+            // --skip-connection-status: don't probe every org's auth over the
+            // network. That probe is the slow part of `sf org list` (seconds per
+            // org), and an org that fails it can drop out of the result — which
+            // downstream code reads as "org gone" and can wipe the saved
+            // selection. We never read connectedStatus, so skipping it is pure win.
+            const result = await this.runCliAsync(['org', 'list', '--skip-connection-status', '--json']);
             const parsed = JSON.parse(result);
             const orgs: OrgInfo[] = [];
 
@@ -283,6 +295,10 @@ export class SfCliService {
         }
 
         const targetOrgArgs = this.getTargetOrgArgs();
+        // Capture the org this describe runs against. If a switch lands before the
+        // CLI returns, the result belongs to the org named in argv above — caching
+        // it now would poison (and later serve) the NEW org's in-memory cache.
+        const orgAtStart = this.currentOrg?.username;
         try {
             const result = await this.runCliAsync([
                 'sobject',
@@ -298,7 +314,11 @@ export class SfCliService {
             });
             const describe = this.parseDescribeResult(result);
 
-            this.metadataCache.set(key, describe);
+            // Only cache when still on the org we described; otherwise return the
+            // data to the caller but leave the (now different) org's cache alone.
+            if (this.currentOrg?.username === orgAtStart) {
+                this.metadataCache.set(key, describe);
+            }
             return { describe };
         } catch (err: any) {
             const timedOut = this.isTimeoutError(err);

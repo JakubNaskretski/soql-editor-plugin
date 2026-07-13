@@ -10,7 +10,7 @@ import { QueryExecutor } from './queryExecutor';
 import { SoqlPanelProvider } from './soqlPanelProvider';
 import { MetadataProvider } from './metadataProvider';
 import { QueryHistoryStore } from './queryHistory';
-import { getSharedOrg, migrateToSharedOrg, onSharedOrgChange, setSharedOrg } from './kit/orgs';
+import { migrateToSharedOrg, onSharedOrgChange } from './kit/orgs';
 
 const SOQL_SELECTOR: vscode.DocumentSelector = { language: 'soql', scheme: 'file' };
 const LAST_SELECTED_ORG_KEY = 'soqlEditor.lastSelectedOrgUsername';
@@ -44,14 +44,13 @@ export function activate(context: vscode.ExtensionContext) {
     // Single org-change handler (consolidated; previously two separate listeners
     // were registered, neither disposed).
     orgPicker.onOrgChanged(async (org) => {
-        // Keep the legacy private key updated for one release (migration fallback),
-        // and mirror to the shared cross-plugin setting so the rest of the family
-        // retargets the same org (Tier 1). The picker also writes the shared
-        // setting directly; this covers startup auto-select / external switches.
+        // Keep the legacy private key updated for one release (migration fallback).
+        // The shared cross-plugin setting is written ONLY by a user-initiated pick
+        // (inside OrgPicker.applySelection). Programmatic changes that reach here —
+        // startup auto-select and external shared-setting changes — must NOT write
+        // it back, or merely activating this plugin (or following another sibling's
+        // switch) would silently retarget the whole family.
         await context.globalState.update(LAST_SELECTED_ORG_KEY, org.username);
-        if (getSharedOrg() !== org.username) {
-            void setSharedOrg(org.username);
-        }
 
         // Drop the shared, non-per-org in-memory caches so the new org never
         // briefly serves the previous org's object list (30s TTL window).

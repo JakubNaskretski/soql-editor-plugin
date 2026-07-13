@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.4
+
+- The shared target org can no longer be changed by this plugin on its own: only
+  picking an org yourself writes the setting shared across the Skrety Salesforce
+  plugins — activating the extension or following another plugin's switch never
+  does. Org listing also skips the per-org connection probe whose hiccups could
+  transiently "lose" an org.
+- Org switches mid-operation can't mix data anymore: a describe or object-list
+  call finishing after a switch no longer writes into the new org's caches, rapid
+  switches apply in order (latest wins), and query results are labeled with the
+  org they actually ran against.
+- External org changes are followed even when this plugin can't fully resolve the
+  org yet, and an externally cleared org now shows a proper no-org state.
+
 ## 0.8.3
 
 - Autocomplete and error-checking racing on a not-yet-cached object now share one
