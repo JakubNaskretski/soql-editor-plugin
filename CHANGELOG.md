@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.5
+
+- Fixed: **Windows support.** The `sf` CLI now launches on Windows (recent VS Code builds
+  refused to start `sf.cmd`), and queries are passed to the CLI via a temp file — so
+  multi-line and quoted SOQL runs everywhere, huge queries can't overflow the Windows
+  command line, and your query text stays out of process lists. Org cache folder names
+  are Windows-safe (reserved names like `aux`, trailing dots, length, casing), and cache
+  bootstrap failures are reported instead of vanishing silently.
+
 ## 0.8.4
 
 - The shared target org can no longer be changed by this plugin on its own: only

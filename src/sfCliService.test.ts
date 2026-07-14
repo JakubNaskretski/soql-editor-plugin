@@ -14,11 +14,23 @@ vi.mock('vscode', () => ({
 // Stub the CLI shell-out so openRecord can be exercised without a real `sf`.
 vi.mock('child_process', () => ({ execFile: vi.fn() }));
 
+// Partial-mock the kit: planSpawn defaults to the REAL implementation (so on
+// this non-Windows test runner every existing test below sees the same
+// identity passthrough it always has), but a single test can override one
+// call with mockReturnValueOnce/mockImplementationOnce to simulate the
+// Windows .cmd-rewrite plans without needing to fake process.platform.
+vi.mock('./kit/sfCli', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('./kit/sfCli')>();
+    return { ...actual, planSpawn: vi.fn(actual.planSpawn) };
+});
+
 import { execFile } from 'child_process';
 import { normalizeSObjectApiName } from './sobjectName';
 import { parseSoqlQueryError, SfCliService, OrgInfo } from './sfCliService';
+import { planSpawn } from './kit/sfCli';
 
 const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
+const planSpawnMock = vi.mocked(planSpawn);
 
 function makeService() {
     return new SfCliService({ appendLine: vi.fn() } as any);
@@ -240,5 +252,61 @@ describe('SfCliService.describeSObject org-switch cache guard', () => {
         await svc.describeSObject('Account');
 
         expect(svc.getCachedDescribe('Account')?.name).toBe('Account');
+    });
+});
+
+describe('SfCliService.runCliAsync Windows spawn-plan wiring', () => {
+    // Node refuses to execFile a `.cmd`/`.bat` launcher with shell:false (EINVAL)
+    // even via an absolute path, so runCliAsync must run the resolved sf command
+    // through planSpawn and execute WHATEVER it returns — never the raw resolved
+    // path directly. These tests fake planSpawn's return value (rather than
+    // process.platform) to prove that wiring without depending on the host OS.
+    beforeEach(() => {
+        execFileMock.mockReset();
+        execFileMock.mockImplementation((_file, _args, _opts, cb) =>
+            cb(null, JSON.stringify({ result: { nonScratchOrgs: [] } }), '')
+        );
+        planSpawnMock.mockClear();
+    });
+
+    it('execFiles the node/run.js bypass planSpawn returns, not the raw .cmd path', async () => {
+        planSpawnMock.mockReturnValueOnce({
+            command: 'node',
+            args: ['C:\\Program Files\\sf\\bin\\run.js', 'org', 'list', '--skip-connection-status', '--json'],
+        });
+        const svc = makeService();
+
+        await svc.listOrgs();
+
+        expect(planSpawnMock).toHaveBeenCalledTimes(1);
+        expect(execFileMock.mock.calls[0][0]).toBe('node');
+        expect(execFileMock.mock.calls[0][1]).toEqual([
+            'C:\\Program Files\\sf\\bin\\run.js', 'org', 'list', '--skip-connection-status', '--json',
+        ]);
+    });
+
+    it('threads windowsVerbatimArguments from the cmd.exe fallback plan into the execFile options', async () => {
+        planSpawnMock.mockReturnValueOnce({
+            command: 'cmd.exe',
+            args: ['/d', '/s', '/c', '"C:\\Program Files\\sf\\bin\\sf.cmd" org list --skip-connection-status --json'],
+            windowsVerbatimArguments: true,
+        });
+        const svc = makeService();
+
+        await svc.listOrgs();
+
+        expect(execFileMock.mock.calls[0][0]).toBe('cmd.exe');
+        expect(execFileMock.mock.calls[0][2]).toMatchObject({ windowsVerbatimArguments: true });
+    });
+
+    it('rejects instead of shelling out when planSpawn refuses an unsafe argument', async () => {
+        const { SfCliError } = await import('./kit/sfCli');
+        planSpawnMock.mockImplementationOnce(() => {
+            throw new SfCliError('Cannot pass this argument through cmd.exe safely: bad"arg');
+        });
+        const svc = makeService();
+
+        await expect(svc.listOrgs()).rejects.toThrow(/bad"arg/);
+        expect(execFileMock).not.toHaveBeenCalled();
     });
 });

@@ -326,7 +326,20 @@ export class MetadataProvider {
     }
 
     private sanitizeOrgCacheKey(name: string): string {
-        return name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        let key = name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        // Windows extras beyond the char whitelist: reserved device names (CON,
+        // NUL, COM1…) are invalid path segments even with a suffix, and Win32
+        // silently strips trailing dots — an org ALIAS like "aux" would otherwise
+        // quietly disable that org's disk cache.
+        key = key.replace(/\.+$/, '_');
+        if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(key)) { key = `_${key}`; }
+        // Length cap (80-char usernames stack under globalStorage toward MAX_PATH)
+        // and win32 case fold — NTFS already treats "DevOrg"/"devorg" as one dir,
+        // so folding just makes the code agree with the filesystem. Migration-free:
+        // the plugin never worked on Windows before the spawn fix.
+        if (key.length > 64) { key = key.slice(0, 64); }
+        if (process.platform === 'win32') { key = key.toLowerCase(); }
+        return key || '_';
     }
 
     /**
@@ -473,7 +486,16 @@ export class MetadataProvider {
             return 0;
         }
 
-        fs.mkdirSync(resolvedDest, { recursive: true });
+        try {
+            fs.mkdirSync(resolvedDest, { recursive: true });
+        } catch (err) {
+            // Windows can refuse the per-org dir outright (reserved-name alias, AV
+            // lock). This path runs un-awaited off the org-change emitter — a throw
+            // here used to become a silent unhandled rejection. Log + degrade like
+            // every other write site in this file.
+            this.outputChannel.appendLine(`Cache bootstrap failed to create ${resolvedDest}: ${err instanceof Error ? err.message : String(err)}`);
+            return 0;
+        }
         let copied = 0;
 
         for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
@@ -507,7 +529,13 @@ export class MetadataProvider {
         const localObjectNames = this.localScanner.getLocalObjectNames();
         if (localObjectNames.length === 0) { return 0; }
 
-        fs.mkdirSync(cacheDir, { recursive: true });
+        try {
+            fs.mkdirSync(cacheDir, { recursive: true });
+        } catch (err) {
+            // Same silent-unhandled-rejection hazard as bootstrapCurrentOrgCacheFrom.
+            this.outputChannel.appendLine(`Cache bootstrap failed to create ${cacheDir}: ${err instanceof Error ? err.message : String(err)}`);
+            return 0;
+        }
         let saved = 0;
         const objectList = new Set<string>(this.loadObjectListFromDisk() || []);
         for (const objectName of localObjectNames) {

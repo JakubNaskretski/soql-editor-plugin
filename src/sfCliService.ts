@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
+import { promises as fsp } from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { normalizeSObjectApiName } from './sobjectName';
-import { resolveSfCommand } from './kit/sfCli';
+import { resolveSfCommand, planSpawn } from './kit/sfCli';
 export { normalizeSObjectApiName } from './sobjectName';
 
 /** A SOQL query failure parsed into its useful parts. */
@@ -143,9 +146,14 @@ export class SfCliService {
     private outputChannel: vscode.OutputChannel;
     private lastObjectListError: string | undefined;
     /** Absolute path (or bare name) of the `sf` launcher, resolved once. On
-     *  Windows this is the `sf.cmd`/`sf.ps1` shim path that execFile can actually
-     *  start; on POSIX it stays `'sf'`. Fixes the family-wide Windows bug where
-     *  `execFile('sf')` failed and was misreported as "sf not found on PATH". */
+     *  Windows this is the `sf.cmd`/`sf.ps1` shim path; on POSIX it stays
+     *  `'sf'`. This raw path is NOT directly startable by `execFile` on
+     *  Windows — Node refuses `.cmd`/`.bat` with `shell:false` (EINVAL) even
+     *  via an absolute path — so `runCliAsync` runs it through `planSpawn`
+     *  (bypasses to `node .../bin/run.js`, or `cmd.exe /d /s /c` as a last
+     *  resort) before every `execFile` call. Fixes the family-wide Windows bug
+     *  where `execFile('sf')` failed and was misreported as "sf not found on
+     *  PATH". */
     private resolvedSfCommand: string | undefined;
 
     private logEmitter = new vscode.EventEmitter<{ level: string; message: string }>();
@@ -334,25 +342,42 @@ export class SfCliService {
      * Execute a SOQL query using the Tooling API or regular Data API.
      */
     async executeQuery(query: string, useToolingApi: boolean = false, signal?: AbortSignal): Promise<any> {
-        const args = ['data', 'query', '--query', query, '--json', '--result-format', 'json'];
+        // The SOQL travels via a temp FILE (`--file`), never argv. Three reasons:
+        // (1) Windows — planSpawn's cmd.exe fallback rightly refuses argv containing
+        // newlines or double quotes, which multi-line/quoted SOQL (this editor's
+        // bread and butter) always trips; (2) a big query can overflow the ~8k
+        // Windows command-line limit; (3) argv leaks the query (possible PII in
+        // WHERE filters) into process lists and spawn errors — a file keeps it
+        // out of both entirely.
+        const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'soql-editor-'));
+        const queryFile = path.join(tmpDir, 'query.soql');
+        try {
+            await fsp.writeFile(queryFile, query, 'utf8');
+        } catch (err) {
+            await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+            // A temp-write failure is NOT a query error — name it, don't let it
+            // fall through buildQueryError's generic "CLI returned no detail".
+            throw new SoqlQueryError({ message: `Could not stage the query to a temp file: ${err instanceof Error ? err.message : String(err)}` });
+        }
+        const args = ['data', 'query', '--file', queryFile, '--json', '--result-format', 'json'];
         if (useToolingApi) {
             args.push('--use-tooling-api');
         }
         args.push(...this.getTargetOrgArgs());
 
-        // Pass the redacted log line as logLabel so runCliAsync doesn't emit a
-        // second `sf data query ...` line that would leak the full query in argv.
-        const logLabel = `sf data query --json --result-format json (query redacted, length=${query.length})`;
+        // Redacted log line: the temp path is meaningless to readers and the query
+        // itself stays out of the output channel.
+        const logLabel = `sf data query --json --result-format json (query via temp file, length=${query.length})`;
 
         let stdout: string;
         try {
             stdout = await this.runCliAsync(args, { logLabel, signal });
         } catch (err: any) {
-            // `sf` exits non-zero on query errors. Node's error.message embeds the
-            // full argv — including the SOQL, which may contain PII in WHERE
-            // filters — so we never surface it. We parse the CLI's JSON error
+            // `sf` exits non-zero on query errors. We parse the CLI's JSON error
             // envelope (written to stdout) into a structured, readable error.
             throw this.buildQueryError(err);
+        } finally {
+            await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
         }
 
         let parsed: any;
@@ -491,10 +516,21 @@ export class SfCliService {
         }
         const sfCommand = this.resolvedSfCommand;
         return new Promise((resolve, reject) => {
+            // planSpawn rewrites a Windows `.cmd`/`.bat` launcher (Node refuses to
+            // execFile those with shell:false, even via an absolute path — EINVAL)
+            // into something actually spawnable: node running the npm-layout
+            // bin/run.js directly, or cmd.exe /d /s /c with validated/quoted argv.
+            // On non-Windows (and for a bare 'sf' on Windows) it is a no-op passthrough.
+            const plan = planSpawn(sfCommand, args);
             execFile(
-                sfCommand,
-                args,
-                { timeout: options?.timeoutMs ?? 60000, maxBuffer: 10 * 1024 * 1024, signal: options?.signal },
+                plan.command,
+                plan.args,
+                {
+                    timeout: options?.timeoutMs ?? 60000,
+                    maxBuffer: 10 * 1024 * 1024,
+                    signal: options?.signal,
+                    windowsVerbatimArguments: plan.windowsVerbatimArguments,
+                },
                 (error, stdout, stderr) => {
                 if (stderr && stderr.trim()) {
                     this.log('warn', `stderr: ${stderr.trim()}`);
