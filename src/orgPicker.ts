@@ -6,8 +6,18 @@ interface OrgQuickPickItem extends vscode.QuickPickItem {
     org: OrgInfo;
 }
 
+/** globalState key holding the last successful `sf org list` result, so the
+ *  picker opens instantly (even in a fresh window) while a live list loads. */
+const ORG_LIST_CACHE_KEY = 'soqlEditor.cachedOrgList';
+
 /**
  * Manages org selection via a status bar item and quick pick.
+ *
+ * The org list is cached (in memory + globalState): opening the picker shows
+ * the cached orgs immediately and revalidates via `sf org list` in the
+ * background, swapping the items in place when the live list lands — so a
+ * just-added org appears without reopening. Explicit refresh: the picker's
+ * ↻ title button or the `SOQL: Refresh Org List` palette command.
  */
 export class OrgPicker {
     private statusBarItem: vscode.StatusBarItem;
@@ -18,8 +28,30 @@ export class OrgPicker {
      *  newer choice: each external event captures it and bails if superseded. */
     private applyGeneration = 0;
 
-    constructor(sfCli: SfCliService) {
+    /** Cached org list backing the picker (display-only — selection state and
+     *  external-switch resolution still always fetch live). */
+    private knownOrgs: OrgInfo[] = [];
+    /** Monotonic token: only the newest in-flight list fetch may update the
+     *  cache/picker, so a slow stale fetch can't clobber a fresh refresh. */
+    private listGeneration = 0;
+    /** The QuickPick currently on screen — used to no-op a re-entrant open
+     *  (status-bar double-click) and to retarget refresh results. */
+    private activePick: vscode.QuickPick<OrgQuickPickItem> | undefined;
+
+    constructor(sfCli: SfCliService, private readonly globalState?: vscode.Memento) {
         this.sfCli = sfCli;
+
+        // Seed from the persisted copy; drop malformed entries rather than let a
+        // corrupt cache break the picker (it self-heals on the next fetch).
+        const cached = globalState?.get<OrgInfo[]>(ORG_LIST_CACHE_KEY);
+        if (Array.isArray(cached)) {
+            this.knownOrgs = cached.filter(o =>
+                o
+                && typeof o.username === 'string'
+                && typeof o.alias === 'string'
+                && typeof o.instanceUrl === 'string'
+            );
+        }
 
         this.statusBarItem = vscode.window.createStatusBarItem(
             vscode.StatusBarAlignment.Left,
@@ -31,47 +63,127 @@ export class OrgPicker {
         this.statusBarItem.show();
     }
 
-    async showPicker(): Promise<void> {
-        let orgs: OrgInfo[];
-        try {
-            orgs = await vscode.window.withProgress(
-                { location: vscode.ProgressLocation.Notification, title: 'Loading orgs...' },
-                () => this.sfCli.listOrgs()
-            );
-        } catch (err: any) {
-            vscode.window.showErrorMessage(`Failed to list orgs: ${err.message}`);
-            return;
-        }
+    /** Update the in-memory + persisted org cache (persist is fire-and-forget;
+     *  a storage failure only costs the warm start, so it's swallowed). */
+    private setKnownOrgs(orgs: OrgInfo[]) {
+        this.knownOrgs = orgs;
+        this.globalState?.update(ORG_LIST_CACHE_KEY, orgs).then(undefined, () => {});
+    }
 
-        if (orgs.length === 0) {
-            vscode.window.showWarningMessage('No authenticated Salesforce orgs found. Run `sf org login web` first.');
-            return;
-        }
-
-        const items: OrgQuickPickItem[] = orgs.map(o => ({
-            label: o.alias,
-            description: o.username,
-            detail: o.instanceUrl,
-            picked: o.isDefault,
-            org: o,
-        }));
-
-        const picked = await vscode.window.showQuickPick(items, {
-            placeHolder: 'Select a Salesforce org to query against',
-            matchOnDescription: true,
-            matchOnDetail: true,
-        });
-
-        if (picked) {
-            const selectedOrg = picked.org;
-            if (selectedOrg) {
+    /**
+     * Open the org picker. Resolves when the picker closes (picked or
+     * dismissed). Cached orgs render instantly; a background `sf org list`
+     * refreshes them in place.
+     */
+    showPicker(): Promise<void> {
+        if (this.activePick) { return Promise.resolve(); } // double-click on the status bar
+        const qp = vscode.window.createQuickPick<OrgQuickPickItem>();
+        this.activePick = qp;
+        qp.placeholder = 'Select a Salesforce org to query against';
+        qp.matchOnDescription = true;
+        qp.matchOnDetail = true;
+        qp.buttons = [{ iconPath: new vscode.ThemeIcon('refresh'), tooltip: 'Refresh org list' }];
+        this.renderItems(qp, this.knownOrgs);
+        qp.onDidTriggerButton(() => { void this.revalidate(qp); });
+        qp.onDidAccept(() => {
+            const picked = qp.selectedItems[0];
+            qp.hide();
+            if (picked) {
                 // User-initiated pick: applySelection publishes the choice to the
                 // shared cross-plugin setting so the other family plugins retarget
                 // the same org. This is the ONLY path allowed to write it.
-                this.applySelection(selectedOrg, true);
-                vscode.window.showInformationMessage(`SOQL Editor: Now targeting ${selectedOrg.alias}`);
+                this.applySelection(picked.org, true);
+                vscode.window.showInformationMessage(`SOQL Editor: Now targeting ${picked.org.alias}`);
             }
+        });
+        const closed = new Promise<void>(resolve => {
+            qp.onDidHide(() => {
+                if (this.activePick === qp) { this.activePick = undefined; }
+                qp.dispose();
+                resolve();
+            });
+        });
+        qp.show();
+        void this.revalidate(qp);
+        return closed;
+    }
+
+    /** Palette command (`SOQL: Refresh Org List`): force-refresh the cached org
+     *  list so the picker reflects a just-added/removed org. */
+    async refreshOrgs(): Promise<void> {
+        const gen = ++this.listGeneration;
+        try {
+            const orgs = await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: 'SOQL: Refreshing org list...' },
+                () => this.sfCli.listOrgs()
+            );
+            if (gen !== this.listGeneration) { return; } // superseded by a newer fetch
+            this.setKnownOrgs(orgs);
+            if (this.activePick) {
+                // This fetch is now the newest, so it owns the busy spinner too —
+                // a revalidate it superseded returns early without clearing it.
+                this.activePick.busy = false;
+                this.renderItems(this.activePick, orgs);
+            }
+            if (orgs.length === 0) {
+                vscode.window.showWarningMessage('No authenticated Salesforce orgs found. Run `sf org login web` first.');
+            } else {
+                vscode.window.showInformationMessage(
+                    `SOQL Editor: Org list refreshed — ${orgs.length} org${orgs.length === 1 ? '' : 's'}.`
+                );
+            }
+        } catch (err: any) {
+            // Superseded by a newer fetch → stay silent; that fetch owns the
+            // spinner and reports its own outcome (avoids double error toasts).
+            if (gen !== this.listGeneration) { return; }
+            if (this.activePick) { this.activePick.busy = false; }
+            vscode.window.showErrorMessage(`Failed to refresh org list: ${err.message}`);
         }
+    }
+
+    /** Swap the picker's items, keeping the highlight on the org the user had
+     *  it on (or the current org for a fresh picker). */
+    private renderItems(qp: vscode.QuickPick<OrgQuickPickItem>, orgs: OrgInfo[]) {
+        const active = qp.activeItems[0]?.org.username ?? this.sfCli.getCurrentOrg()?.username;
+        qp.items = orgs.map(o => ({
+            label: o.alias,
+            description: o.username,
+            detail: o.instanceUrl,
+            org: o,
+        }));
+        const keep = active ? qp.items.find(i => i.org.username === active) : undefined;
+        if (keep) { qp.activeItems = [keep]; }
+    }
+
+    /** Fetch a live org list; if still the newest fetch, update the cache and
+     *  the picker. A failure while cached items are on screen keeps serving
+     *  them (the service already logged it); a failure with nothing to show
+     *  keeps the old loud error path. */
+    private async revalidate(qp: vscode.QuickPick<OrgQuickPickItem>): Promise<void> {
+        const gen = ++this.listGeneration;
+        qp.busy = true;
+        let orgs: OrgInfo[];
+        try {
+            orgs = await this.sfCli.listOrgs();
+        } catch (err: any) {
+            if (gen !== this.listGeneration || this.activePick !== qp) { return; }
+            qp.busy = false;
+            if (qp.items.length === 0) {
+                qp.hide();
+                vscode.window.showErrorMessage(`Failed to list orgs: ${err.message}`);
+            }
+            return;
+        }
+        if (gen !== this.listGeneration) { return; } // superseded by a newer fetch
+        this.setKnownOrgs(orgs);
+        if (this.activePick !== qp) { return; } // picker closed while loading
+        qp.busy = false;
+        if (orgs.length === 0) {
+            qp.hide();
+            vscode.window.showWarningMessage('No authenticated Salesforce orgs found. Run `sf org login web` first.');
+            return;
+        }
+        this.renderItems(qp, orgs);
     }
 
     /** Apply an org locally (sfCli + label + change event). Shared between the
@@ -137,6 +249,8 @@ export class OrgPicker {
             }
             return;
         }
+        // A fresh list landed — cache it even if this switch lost the race below.
+        this.setKnownOrgs(orgs);
         if (gen !== this.applyGeneration) { return; } // a newer switch won the race
 
         // Fall back to a minimal OrgInfo when the username isn't in the list (auth
@@ -150,6 +264,7 @@ export class OrgPicker {
     async autoSelectDefault(preferredUsername?: string): Promise<void> {
         try {
             const orgs = await this.sfCli.listOrgs();
+            this.setKnownOrgs(orgs); // warm the picker cache at activation
             const preferredOrg = preferredUsername
                 ? orgs.find(o => o.username.toLowerCase() === preferredUsername.toLowerCase())
                 : undefined;
@@ -173,6 +288,7 @@ export class OrgPicker {
     }
 
     dispose() {
+        this.activePick?.dispose();
         this.statusBarItem.dispose();
         this.onOrgChangedEmitter.dispose();
     }

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+- **The org picker opens instantly.** The org list is cached — including across
+  window reloads — so clicking the status-bar org no longer waits on a `sf org list`
+  call. The picker still refreshes in the background while open, so an org you just
+  authenticated appears in the list by itself a moment later.
+- New ↻ button on the org picker and a new `SOQL: Refresh Org List` command in the
+  palette to force-refresh the cached list at any time.
+- Hardening: the browser fallback used when opening a record only follows `https`
+  instance URLs.
+
 ## 0.8.5
 
 - Fixed: **Windows support.** The `sf` CLI now launches on Windows (recent VS Code builds

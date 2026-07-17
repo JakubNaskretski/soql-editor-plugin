@@ -2,7 +2,7 @@
   "name": "soql-editor",
   "displayName": "SOQL Editor",
   "description": "SOQL editor for Salesforce with smart autocomplete, validation, and multi-org query execution",
-  "version": "0.8.5",
+  "version": "0.9.0",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "keywords": [
@@ -78,6 +78,10 @@
       {
         "command": "soqlEditor.selectOrg",
         "title": "SOQL: Select Org"
+      },
+      {
+        "command": "soqlEditor.refreshOrgs",
+        "title": "SOQL: Refresh Org List"
       },
       {
         "command": "soqlEditor.refreshMetadata",

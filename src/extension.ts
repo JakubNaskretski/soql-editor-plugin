@@ -25,8 +25,9 @@ export function activate(context: vscode.ExtensionContext) {
     // Per-org query history (globalState ring buffer, 50 entries).
     const history = new QueryHistoryStore(context.globalState);
 
-    // Org picker (status bar + quick pick)
-    const orgPicker = new OrgPicker(sfCli);
+    // Org picker (status bar + quick pick; globalState persists the org-list
+    // cache so the picker opens instantly in a fresh window).
+    const orgPicker = new OrgPicker(sfCli, context.globalState);
 
     // Sidebar panel
     const panelProvider = new SoqlPanelProvider(sfCli, metadata, outputChannel, context.extensionUri, history);
@@ -117,6 +118,12 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('soqlEditor.selectOrg', () => {
             return orgPicker.showPicker();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('soqlEditor.refreshOrgs', () => {
+            return orgPicker.refreshOrgs();
         })
     );
 

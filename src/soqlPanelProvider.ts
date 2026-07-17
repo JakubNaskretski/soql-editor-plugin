@@ -162,7 +162,10 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                         // Fall back to the bare instance URL (lands on the login page,
                         // which then redirects to the record once the user signs in).
                         const opened = await this.sfCli.openRecord(rawId);
-                        if (!opened && org.instanceUrl) {
+                        // Require https here: org data can originate from the
+                        // picker's persisted cache, and this is the one path where
+                        // its instanceUrl reaches the browser.
+                        if (!opened && /^https:\/\//i.test(org.instanceUrl)) {
                             const url = `${org.instanceUrl.replace(/\/$/, '')}/${rawId}`;
                             await vscode.env.openExternal(vscode.Uri.parse(url));
                         }
