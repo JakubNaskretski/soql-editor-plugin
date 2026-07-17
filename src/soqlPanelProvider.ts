@@ -5,6 +5,7 @@ import { getPanelHtml } from './panelHtml';
 import { getSuggestions } from './panelSuggestions';
 import { validateSoqlStructure } from './soqlParser';
 import { applyLimit, buildCountQuery, hasLimitClause, shouldPromptForCount } from './querySafety';
+import { injectCreatedDateSort } from './createdDateSort';
 import { flattenRecordForDisplay } from './resultFlattening';
 import { PANEL_LOCAL_RESOURCE_ROOT } from './webviewAssets';
 import { QueryHistoryStore } from './queryHistory';
@@ -71,13 +72,15 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         this.logSubscription?.dispose();
         this.logSubscription = undefined;
 
-        // Always push org state to webview immediately so label never shows stale restored state.
+        // Always push org state to webview immediately so the picklist never
+        // shows stale restored state.
         const currentOrg = this.sfCli.getCurrentOrg();
         this.postMessage({
             type: 'orgChanged',
             alias: currentOrg?.alias,
             username: currentOrg?.username,
         });
+        this.notifyOrgList();
 
         // Pipe CLI log events to the webview console
         this.logSubscription = this.sfCli.onLog(({ level, message }: { level: string; message: string }) => {
@@ -102,7 +105,12 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
             try {
                 switch (msg.type) {
                     case 'executeQuery':
-                        await this.handleExecuteQuery(msg.query, msg.runTabId, msg.useToolingApi === true);
+                        await this.handleExecuteQuery(
+                            msg.query,
+                            msg.runTabId,
+                            msg.useToolingApi === true,
+                            msg.sortByCreatedDate === true
+                        );
                         break;
                     case 'cancelQuery':
                         this.handleCancelQuery();
@@ -122,7 +130,17 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
                         break;
                     }
                     case 'selectOrg':
-                        await vscode.commands.executeCommand('soqlEditor.selectOrg');
+                        // The inline picklist sends the chosen username; a stale
+                        // webview (pre-picklist) sends none → fall back to the
+                        // QuickPick.
+                        if (typeof msg.username === 'string' && msg.username) {
+                            this.onPickOrg?.(msg.username);
+                        } else {
+                            await vscode.commands.executeCommand('soqlEditor.selectOrg');
+                        }
+                        break;
+                    case 'refreshOrgs':
+                        await this.onRefreshOrgs?.();
                         break;
                     case 'loadMetadata':
                         await this.handleLoadMetadata();
@@ -185,6 +203,22 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
     }
 
     /** Called when the org changes so the webview can update its label */
+    /** Wired by extension.ts — the inline org picklist's data source and actions
+     *  (all owned by OrgPicker, which the provider deliberately doesn't know). */
+    public getOrgs?: () => OrgInfo[];
+    public onPickOrg?: (username: string) => void;
+    public onRefreshOrgs?: () => Promise<void> | void;
+
+    /** Push the cached org list + current target into the panel's picklist. */
+    notifyOrgList() {
+        const orgs = this.getOrgs?.() ?? [];
+        this.postMessage({
+            type: 'orgList',
+            orgs: orgs.map(o => ({ alias: o.alias, username: o.username })),
+            current: this.sfCli.getCurrentOrg()?.username,
+        });
+    }
+
     notifyOrgChanged(org: OrgInfo) {
         this.postMessage({ type: 'orgChanged', alias: org.alias, username: org.username });
     }
@@ -197,7 +231,7 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
 
     private async handleLoadMetadata() {
         if (!this.sfCli.getCurrentOrg()) {
-            this.postMessage({ type: 'error', message: 'Select an org first (click the org label above)' });
+            this.postMessage({ type: 'error', message: 'Select an org first (use the org dropdown above)' });
             return;
         }
         const pick = await vscode.window.showQuickPick([
@@ -263,10 +297,10 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
 
     // ── query execution ──────────────────────────────────────────────
 
-    private async handleExecuteQuery(query: string, runTabId?: number, useToolingApi = false) {
+    private async handleExecuteQuery(query: string, runTabId?: number, useToolingApi = false, sortByCreatedDate = false) {
         if (!query.trim()) { return; }
         if (!this.sfCli.getCurrentOrg()) {
-            this.postMessage({ type: 'error', message: 'Select an org first (click the org button above)', runTabId });
+            this.postMessage({ type: 'error', message: 'Select an org first (use the org dropdown above)', runTabId });
             return;
         }
 
@@ -281,6 +315,21 @@ export class SoqlPanelProvider implements vscode.WebviewViewProvider {
         if (this.executing) {
             this.postMessage({ type: 'info', message: 'A query is already running', runTabId });
             return;
+        }
+
+        // Opt-in "Newest first" checkbox: the EXECUTED query gets
+        // ORDER BY CreatedDate DESC when that's legal; editor text and history
+        // keep what the user wrote. One console line says what happened either
+        // way, so the checkbox never acts silently. (Below the re-entrancy guard
+        // so a rejected run can't log an action it never took.)
+        if (sortByCreatedDate) {
+            const sorted = injectCreatedDateSort(query);
+            if (sorted.applied) {
+                query = sorted.query;
+                this.postMessage({ type: 'log', level: 'info', message: 'Newest first: appended ORDER BY CreatedDate DESC' });
+            } else {
+                this.postMessage({ type: 'log', level: 'info', message: 'Newest first: not applied — ' + sorted.reason });
+            }
         }
         this.executing = true;
         const abort = new AbortController();

@@ -24,6 +24,10 @@ export class OrgPicker {
     private sfCli: SfCliService;
     private onOrgChangedEmitter = new vscode.EventEmitter<OrgInfo>();
     public readonly onOrgChanged = this.onOrgChangedEmitter.event;
+    /** Fires whenever a fresh org list lands in the cache — feeds the panel's
+     *  inline org picklist. */
+    private onOrgListChangedEmitter = new vscode.EventEmitter<OrgInfo[]>();
+    public readonly onOrgListChanged = this.onOrgListChangedEmitter.event;
     /** Monotonic token so out-of-order external-switch resolutions can't revert a
      *  newer choice: each external event captures it and bails if superseded. */
     private applyGeneration = 0;
@@ -37,6 +41,10 @@ export class OrgPicker {
     /** The QuickPick currently on screen — used to no-op a re-entrant open
      *  (status-bar double-click) and to retarget refresh results. */
     private activePick: vscode.QuickPick<OrgQuickPickItem> | undefined;
+    /** Single-flight guards: rapid ⟳ clicks / refresh commands join the one
+     *  in-flight `sf org list` instead of spawning one process each. */
+    private listOrgsInflight: Promise<OrgInfo[]> | undefined;
+    private refreshInflight: Promise<void> | undefined;
 
     constructor(sfCli: SfCliService, private readonly globalState?: vscode.Memento) {
         this.sfCli = sfCli;
@@ -68,6 +76,29 @@ export class OrgPicker {
     private setKnownOrgs(orgs: OrgInfo[]) {
         this.knownOrgs = orgs;
         this.globalState?.update(ORG_LIST_CACHE_KEY, orgs).then(undefined, () => {});
+        this.onOrgListChangedEmitter.fire(orgs);
+    }
+
+    /** The cached org list (possibly stale until the next fetch lands). */
+    getKnownOrgs(): OrgInfo[] {
+        return this.knownOrgs;
+    }
+
+    /** Select an org by username, from the panel's inline picklist. Honors only
+     *  usernames present in the cached list — the webview can only legitimately
+     *  offer what we gave it, so anything else is stale/forged and ignored.
+     *  This IS a user-initiated pick: it publishes to the shared setting. */
+    pickKnownOrg(username: string): void {
+        const org = this.knownOrgs.find(o => o.username.toLowerCase() === username.toLowerCase());
+        if (org) { this.applySelection(org, true); }
+    }
+
+    /** All picker-surface fetches funnel through here so concurrent callers
+     *  share one `sf org list` spawn. */
+    private fetchOrgList(): Promise<OrgInfo[]> {
+        return (this.listOrgsInflight ??= this.sfCli.listOrgs().finally(() => {
+            this.listOrgsInflight = undefined;
+        }));
     }
 
     /**
@@ -109,13 +140,20 @@ export class OrgPicker {
     }
 
     /** Palette command (`SOQL: Refresh Org List`): force-refresh the cached org
-     *  list so the picker reflects a just-added/removed org. */
-    async refreshOrgs(): Promise<void> {
+     *  list so the picker reflects a just-added/removed org. Re-entrant calls
+     *  (panel ⟳ spam, repeated command) join the in-flight refresh. */
+    refreshOrgs(): Promise<void> {
+        return (this.refreshInflight ??= this.doRefreshOrgs().finally(() => {
+            this.refreshInflight = undefined;
+        }));
+    }
+
+    private async doRefreshOrgs(): Promise<void> {
         const gen = ++this.listGeneration;
         try {
             const orgs = await vscode.window.withProgress(
                 { location: vscode.ProgressLocation.Notification, title: 'SOQL: Refreshing org list...' },
-                () => this.sfCli.listOrgs()
+                () => this.fetchOrgList()
             );
             if (gen !== this.listGeneration) { return; } // superseded by a newer fetch
             this.setKnownOrgs(orgs);
@@ -164,7 +202,7 @@ export class OrgPicker {
         qp.busy = true;
         let orgs: OrgInfo[];
         try {
-            orgs = await this.sfCli.listOrgs();
+            orgs = await this.fetchOrgList();
         } catch (err: any) {
             if (gen !== this.listGeneration || this.activePick !== qp) { return; }
             qp.busy = false;
@@ -291,5 +329,6 @@ export class OrgPicker {
         this.activePick?.dispose();
         this.statusBarItem.dispose();
         this.onOrgChangedEmitter.dispose();
+        this.onOrgListChangedEmitter.dispose();
     }
 }

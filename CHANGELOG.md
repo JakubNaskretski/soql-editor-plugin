@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0
+
+- **Org picklist in the panel.** The org control at the top of the SOQL panel is
+  now a real dropdown, filled instantly from the cached org list and refreshed in
+  the background, with a ⟳ button beside it. Picking an org there works exactly
+  like the status-bar picker (including sharing the choice with the other Skrety
+  Salesforce plugins).
+- **"Newest first" checkbox.** When checked, executed queries automatically get
+  `ORDER BY CreatedDate DESC` — your editor text and query history keep exactly
+  what you wrote. It stays out of the way when the query has its own ORDER BY, a
+  GROUP BY or aggregates (`COUNT()`, `FORMAT(SUM(...))`, …) or FOR UPDATE, and the
+  panel console notes what it did (or why it didn't) on every run.
+- Rapid org-list refreshes now share a single `sf org list` call instead of
+  spawning one per click.
+
 ## 0.9.0
 
 - **The org picker opens instantly.** The org list is cached — including across

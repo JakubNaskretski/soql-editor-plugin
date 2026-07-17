@@ -307,6 +307,59 @@ describe('OrgPicker org-list cache', () => {
     });
 });
 
+describe('OrgPicker panel-picklist API', () => {
+    it('pickKnownOrg applies a cached org as a user pick (writes the shared setting)', async () => {
+        const sfCli = makeSfCli(undefined);
+        const memento = makeMemento({ [ORG_CACHE_KEY]: [ORG_A, ORG_B] });
+
+        const picker = new OrgPicker(sfCli as any, memento as any);
+        const fired = capture(picker);
+        picker.pickKnownOrg('B@EXAMPLE.COM'); // case-insensitive match
+
+        expect(sfCli.setCurrentOrg).toHaveBeenCalledWith(ORG_B);
+        expect(setSharedOrgMock).toHaveBeenCalledWith('b@example.com');
+        expect(fired).toEqual([ORG_B]);
+    });
+
+    it('pickKnownOrg ignores a username missing from the cached list', () => {
+        const sfCli = makeSfCli(undefined);
+        const memento = makeMemento({ [ORG_CACHE_KEY]: [ORG_A] });
+
+        const picker = new OrgPicker(sfCli as any, memento as any);
+        picker.pickKnownOrg('forged@example.com');
+
+        expect(sfCli.setCurrentOrg).not.toHaveBeenCalled();
+        expect(setSharedOrgMock).not.toHaveBeenCalled();
+    });
+
+    it('concurrent refreshes share one sf org list spawn (single-flight)', async () => {
+        const sfCli = makeSfCli(undefined);
+        let resolveList!: (v: OrgInfo[]) => void;
+        sfCli.listOrgs.mockReturnValue(new Promise<OrgInfo[]>(r => { resolveList = r; }));
+
+        const picker = new OrgPicker(sfCli as any);
+        const p1 = picker.refreshOrgs();
+        const p2 = picker.refreshOrgs(); // ⟳ spam joins, doesn't respawn
+        resolveList([ORG_A]);
+        await Promise.all([p1, p2]);
+
+        expect(sfCli.listOrgs).toHaveBeenCalledTimes(1);
+    });
+
+    it('onOrgListChanged fires with the fresh list when a fetch lands', async () => {
+        const sfCli = makeSfCli(undefined);
+        sfCli.listOrgs.mockResolvedValue([ORG_A, ORG_C]);
+
+        const picker = new OrgPicker(sfCli as any);
+        const lists: OrgInfo[][] = [];
+        picker.onOrgListChanged(l => lists.push(l));
+        await picker.refreshOrgs();
+
+        expect(lists).toEqual([[ORG_A, ORG_C]]);
+        expect(picker.getKnownOrgs()).toEqual([ORG_A, ORG_C]);
+    });
+});
+
 describe('OrgPicker.applyExternalOrgUsername resilience', () => {
     it('follows the family via a minimal OrgInfo when the username is not in the org list', async () => {
         const sfCli = makeSfCli(ORG_A);
