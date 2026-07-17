@@ -13,9 +13,11 @@
     const btnRun = document.getElementById('btnRun');
     const btnHistory = document.getElementById('btnHistory');
     const chkTooling = document.getElementById('chkTooling');
+    const chkNewestFirst = document.getElementById('chkNewestFirst');
     const historyDropdown = document.getElementById('historyDropdown');
     const btnLoadMd = document.getElementById('btnLoadMd');
-    const orgLabel = document.getElementById('orgLabel');
+    const orgSelect = document.getElementById('orgSelect');
+    const orgRefresh = document.getElementById('orgRefresh');
     const consoleHeader = document.getElementById('consoleHeader');
     const consoleChevron = document.getElementById('consoleChevron');
     const consoleBadge = document.getElementById('consoleBadge');
@@ -43,12 +45,19 @@
     let lastRows = [];
     let lastRawRows = [];
     let currentOrgLabel = 'No Org';
+    // Inline org picklist state: the cached org list pushed by the host and the
+    // username of the org currently targeted.
+    let orgOptions = [];
+    let currentOrgUsername = '';
     // True while a run is in flight (preflight, confirm prompt, or the query
     // itself). Drives the Run⇄Cancel toggle so a run can always be cancelled.
     let isRunning = false;
     // Panel-global Tooling API toggle (persisted). Sent with every run so the
     // host adds --use-tooling-api.
     let useToolingApi = false;
+    // "Newest first" toggle: ORDER BY CreatedDate DESC is injected host-side
+    // into the executed query only (never into the editor text).
+    let sortNewestFirst = false;
 
     // ── multi-tab state ──
     // Each tab carries a stable, never-reused `id`. A query run is stamped with
@@ -192,7 +201,7 @@
             rawRows: [],
             totalSize: 0,
         }));
-        vscode.setState({ tabs: persistedTabs, activeTab, orgLabel: currentOrgLabel, nextTabId, useToolingApi });
+        vscode.setState({ tabs: persistedTabs, activeTab, orgLabel: currentOrgLabel, nextTabId, useToolingApi, sortNewestFirst });
     }
 
     function bindResultListeners() {
@@ -221,6 +230,12 @@
     // ── Tooling API toggle ──
     chkTooling.addEventListener('change', () => {
         useToolingApi = chkTooling.checked;
+        persistState();
+    });
+
+    // ── Newest first toggle ──
+    chkNewestFirst.addEventListener('change', () => {
+        sortNewestFirst = chkNewestFirst.checked;
         persistState();
     });
 
@@ -325,7 +340,39 @@
         if (isRunning) { cancelQuery(); } else { runQuery(); }
     });
     btnLoadMd.addEventListener('click', () => vscode.postMessage({ type: 'loadMetadata' }));
-    orgLabel.addEventListener('click', () => vscode.postMessage({ type: 'selectOrg' }));
+
+    // Inline org picklist. Options are built exclusively with textContent (org
+    // aliases/usernames must never reach innerHTML).
+    function renderOrgOptions() {
+        orgSelect.textContent = '';
+        let matched = false;
+        for (const o of orgOptions) {
+            if (!o || typeof o.username !== 'string') { continue; }
+            const opt = document.createElement('option');
+            opt.value = o.username;
+            opt.textContent = o.alias || o.username;
+            opt.title = o.username;
+            if (o.username === currentOrgUsername) { opt.selected = true; matched = true; }
+            orgSelect.appendChild(opt);
+        }
+        if (!matched) {
+            // No target yet, an org the list doesn't know (auth held by another
+            // plugin), or an empty list: show a non-pickable placeholder so the
+            // select never silently claims a wrong org.
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = currentOrgUsername
+                ? currentOrgLabel
+                : (orgOptions.length ? 'Select org…' : 'No orgs');
+            opt.disabled = true;
+            opt.selected = true;
+            orgSelect.insertBefore(opt, orgSelect.firstChild);
+        }
+    }
+    orgSelect.addEventListener('change', () => {
+        if (orgSelect.value) { vscode.postMessage({ type: 'selectOrg', username: orgSelect.value }); }
+    });
+    orgRefresh.addEventListener('click', () => vscode.postMessage({ type: 'refreshOrgs' }));
     // Prefix a leading =, +, -, @ so the cell can't be interpreted as a formula
     // when the export is opened in Excel / Google Sheets / LibreOffice (CSV/TSV
     // formula injection). Values are attacker-influenceable (any org record).
@@ -448,7 +495,7 @@
         setRunning(true, launchTabId);
         tabs[activeTab].hasResults = false;
         persistState();
-        vscode.postMessage({ type: 'executeQuery', query: input.value, runTabId: launchTabId, useToolingApi: useToolingApi });
+        vscode.postMessage({ type: 'executeQuery', query: input.value, runTabId: launchTabId, useToolingApi: useToolingApi, sortByCreatedDate: sortNewestFirst });
     }
 
     function cancelQuery() {
@@ -777,12 +824,19 @@
 
             case 'orgChanged':
                 currentOrgLabel = msg.alias || msg.username || 'No Org';
-                orgLabel.textContent = currentOrgLabel;
+                currentOrgUsername = msg.username || '';
+                renderOrgOptions();
                 // The org changed — any open history dropdown belongs to the old
                 // org, so close it (the next open re-requests for the new org).
                 hideHistory();
                 persistState();
                 appendLog('info', 'Switched to org: ' + (msg.alias || msg.username));
+                break;
+
+            case 'orgList':
+                orgOptions = Array.isArray(msg.orgs) ? msg.orgs : [];
+                if (typeof msg.current === 'string' && msg.current) { currentOrgUsername = msg.current; }
+                renderOrgOptions();
                 break;
 
             case 'log':
@@ -1013,6 +1067,10 @@
 
     // Restore state
     const state = vscode.getState();
+    if (state && typeof state.sortNewestFirst === 'boolean') {
+        sortNewestFirst = state.sortNewestFirst;
+        chkNewestFirst.checked = sortNewestFirst;
+    }
     if (state && typeof state.useToolingApi === 'boolean') {
         useToolingApi = state.useToolingApi;
         chkTooling.checked = useToolingApi;
@@ -1034,7 +1092,6 @@
         if (activeTab >= tabs.length) activeTab = 0;
         if (state.orgLabel) {
             currentOrgLabel = state.orgLabel;
-            orgLabel.textContent = currentOrgLabel;
         }
         restoreTab(activeTab);
         renderTabBar();
@@ -1055,6 +1112,8 @@
     input.addEventListener('paste', () => setTimeout(highlightSoql, 0));
     input.addEventListener('focus', highlightSoql);
 
+    // Initial org picklist render (placeholder until the host pushes orgList)
+    renderOrgOptions();
     // Initial highlight on load
     highlightSoql();
     // Initial validation on load

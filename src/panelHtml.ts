@@ -87,16 +87,30 @@ body {
     font-size: 12px;
 }
 .toolbar button:hover { background: var(--vscode-button-hoverBackground); }
-.toolbar .org-label {
+.toolbar .org-wrap {
     margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+.toolbar .org-select {
     font-size: 11px;
-    color: var(--vscode-textLink-foreground);
-    cursor: pointer;
-    text-decoration: underline;
+    max-width: 180px;
+    background: var(--vscode-dropdown-background);
+    color: var(--vscode-dropdown-foreground);
+    border: 1px solid var(--vscode-dropdown-border, transparent);
+    border-radius: 3px;
+    padding: 3px 4px;
+}
+.toolbar button.org-refresh {
     background: none;
     border: none;
-    padding: 4px 6px;
+    color: var(--vscode-textLink-foreground);
+    cursor: pointer;
+    padding: 4px 4px;
+    font-size: 13px;
 }
+.toolbar button.org-refresh:hover { background: var(--vscode-toolbar-hoverBackground, transparent); }
 .toolbar .tooling-toggle {
     display: inline-flex; align-items: center; gap: 3px;
     font-size: 11px;
@@ -446,7 +460,13 @@ body {
     <label class="tooling-toggle" title="Run queries against the Tooling API (ApexClass, CustomField, etc.)">
         <input type="checkbox" id="chkTooling"> Tooling
     </label>
-    <button class="org-label" id="orgLabel" title="Click to change org">No Org</button>
+    <label class="tooling-toggle" title="Execute with ORDER BY CreatedDate DESC appended (skipped when the query has its own ORDER BY, GROUP BY or aggregates — see console)">
+        <input type="checkbox" id="chkNewestFirst"> Newest first
+    </label>
+    <span class="org-wrap" title="Salesforce org for SOQL queries">
+        <select id="orgSelect" class="org-select" title="Select Salesforce org"></select>
+        <button class="org-refresh" id="orgRefresh" title="Refresh org list">&#x27F3;</button>
+    </span>
 </div>
 <div class="history-dropdown" id="historyDropdown"></div>
 

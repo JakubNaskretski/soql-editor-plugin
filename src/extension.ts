@@ -31,6 +31,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Sidebar panel
     const panelProvider = new SoqlPanelProvider(sfCli, metadata, outputChannel, context.extensionUri, history);
+    // The panel's inline org picklist is backed by OrgPicker's cached list:
+    // picking in the dropdown is a user pick (writes the shared org setting),
+    // and every fresh `sf org list` re-feeds the dropdown.
+    panelProvider.getOrgs = () => orgPicker.getKnownOrgs();
+    panelProvider.onPickOrg = (username) => orgPicker.pickKnownOrg(username);
+    panelProvider.onRefreshOrgs = () => orgPicker.refreshOrgs();
+    context.subscriptions.push(orgPicker.onOrgListChanged(() => panelProvider.notifyOrgList()));
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(SoqlPanelProvider.viewType, panelProvider, {
             webviewOptions: { retainContextWhenHidden: true }
