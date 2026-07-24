@@ -99,6 +99,40 @@ export interface OrgInfo {
     isDefault: boolean;
 }
 
+/** Collapse repeated `sf org list` rows by the target identity the family
+ * stores and passes back to the CLI. The CLI can report one authenticated
+ * username in more than one result bucket; usernames are case-insensitive, so
+ * bucket/casing variants must still render as one picker entry. */
+export function dedupeOrgInfos(orgs: OrgInfo[]): OrgInfo[] {
+    const byUsername = new Map<string, OrgInfo>();
+    for (const org of orgs) {
+        if (!org || typeof org.username !== 'string') { continue; }
+        const username = org.username.trim();
+        if (!username) { continue; }
+
+        const key = username.toLowerCase();
+        const previous = byUsername.get(key);
+        const alias = typeof org.alias === 'string' ? org.alias.trim() : '';
+        const previousAlias = previous?.alias.trim() ?? '';
+        const previousHasFriendlyAlias = !!previousAlias
+            && previousAlias.toLowerCase() !== previous?.username.trim().toLowerCase();
+        const nextHasFriendlyAlias = !!alias && alias.toLowerCase() !== key;
+
+        byUsername.set(key, {
+            // Preserve the first CLI spelling of the username (the value written
+            // to the shared setting), but enrich a username-only row when a
+            // later bucket carries its friendly alias or instance URL.
+            username: previous?.username ?? username,
+            alias: previousHasFriendlyAlias
+                ? previousAlias
+                : (nextHasFriendlyAlias ? alias : (previous?.alias || alias || username)),
+            instanceUrl: previous?.instanceUrl || org.instanceUrl || '',
+            isDefault: Boolean(previous?.isDefault || org.isDefault),
+        });
+    }
+    return [...byUsername.values()];
+}
+
 export interface SObjectField {
     name: string;
     label: string;
@@ -213,8 +247,6 @@ export class SfCliService {
             // selection. We never read connectedStatus, so skipping it is pure win.
             const result = await this.runCliAsync(['org', 'list', '--skip-connection-status', '--json']);
             const parsed = JSON.parse(result);
-            const orgs: OrgInfo[] = [];
-
             // sf org list returns { result: { nonScratchOrgs: [...], scratchOrgs: [...] } }
             const allOrgs = [
                 ...(parsed.result?.nonScratchOrgs || []),
@@ -223,16 +255,21 @@ export class SfCliService {
                 ...(parsed.result?.other || []),
             ];
 
+            const orgs: OrgInfo[] = [];
             for (const o of allOrgs) {
+                if (!o || typeof o.username !== 'string' || !o.username.trim()) {
+                    continue;
+                }
+                const username = o.username.trim();
                 orgs.push({
-                    alias: o.alias || o.username,
-                    username: o.username,
-                    instanceUrl: o.instanceUrl || '',
+                    alias: typeof o.alias === 'string' && o.alias.trim() ? o.alias.trim() : username,
+                    username,
+                    instanceUrl: typeof o.instanceUrl === 'string' ? o.instanceUrl : '',
                     isDefault: o.isDefaultUsername || o.defaultMarker === '(U)' || false,
                 });
             }
 
-            return orgs;
+            return dedupeOrgInfos(orgs);
         } catch (err: any) {
             this.log('error', `Failed to list orgs: ${err.message}`);
             throw new Error(`Failed to list orgs. Is Salesforce CLI (sf) installed?\n${err.message}`);

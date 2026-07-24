@@ -216,6 +216,32 @@ describe('SfCliService.listOrgs', () => {
 
         expect(execFileMock.mock.calls[0][1]).toEqual(['org', 'list', '--skip-connection-status', '--json']);
     });
+
+    it('collapses one authenticated username repeated across CLI result buckets', async () => {
+        execFileMock.mockImplementation((_file, _args, _opts, cb) =>
+            cb(null, JSON.stringify({
+                result: {
+                    nonScratchOrgs: [{
+                        username: 'builder@inzorg.example',
+                        instanceUrl: 'https://inzorg.example',
+                        isDefaultUsername: true,
+                    }],
+                    sandboxes: [{
+                        alias: 'inzorg-thesis',
+                        username: 'builder@inzorg.example',
+                    }],
+                },
+            }), '')
+        );
+        const svc = makeService();
+
+        await expect(svc.listOrgs()).resolves.toEqual([{
+            alias: 'inzorg-thesis',
+            username: 'builder@inzorg.example',
+            instanceUrl: 'https://inzorg.example',
+            isDefault: true,
+        }]);
+    });
 });
 
 describe('SfCliService.describeSObject org-switch cache guard', () => {
