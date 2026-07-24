@@ -210,6 +210,20 @@ describe('OrgPicker org-list cache', () => {
         expect(lastQuickPick().items.map((i: any) => i.org)).toEqual([ORG_A]);
     });
 
+    it('deduplicates and repairs a persisted org list before rendering it', async () => {
+        const sfCli = makeSfCli(undefined);
+        sfCli.listOrgs.mockReturnValue(new Promise<OrgInfo[]>(() => {})); // never resolves
+        const duplicate = { ...ORG_A, username: 'A@EXAMPLE.COM', isDefault: false };
+        const memento = makeMemento({ [ORG_CACHE_KEY]: [ORG_A, duplicate] });
+
+        const picker = new OrgPicker(sfCli as any, memento as any);
+        void picker.showPicker();
+
+        expect(picker.getKnownOrgs()).toEqual([ORG_A]);
+        expect(lastQuickPick().items.map((i: any) => i.org)).toEqual([ORG_A]);
+        expect(memento.store[ORG_CACHE_KEY]).toEqual([ORG_A]);
+    });
+
     it('re-entrant open is a no-op while the picker is on screen', async () => {
         const sfCli = makeSfCli(undefined);
         sfCli.listOrgs.mockResolvedValue([ORG_A]);

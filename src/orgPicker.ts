@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { SfCliService, OrgInfo } from './sfCliService';
+import { dedupeOrgInfos, SfCliService, OrgInfo } from './sfCliService';
 import { setSharedOrg } from './kit/orgs';
 
 interface OrgQuickPickItem extends vscode.QuickPickItem {
@@ -53,12 +53,18 @@ export class OrgPicker {
         // corrupt cache break the picker (it self-heals on the next fetch).
         const cached = globalState?.get<OrgInfo[]>(ORG_LIST_CACHE_KEY);
         if (Array.isArray(cached)) {
-            this.knownOrgs = cached.filter(o =>
+            const valid = cached.filter(o =>
                 o
                 && typeof o.username === 'string'
                 && typeof o.alias === 'string'
                 && typeof o.instanceUrl === 'string'
             );
+            this.knownOrgs = dedupeOrgInfos(valid);
+            // Repair old caches immediately so duplicate rows do not flash in
+            // the picker before the background live list finishes loading.
+            if (this.knownOrgs.length !== cached.length) {
+                globalState?.update(ORG_LIST_CACHE_KEY, this.knownOrgs).then(undefined, () => {});
+            }
         }
 
         this.statusBarItem = vscode.window.createStatusBarItem(
@@ -74,9 +80,9 @@ export class OrgPicker {
     /** Update the in-memory + persisted org cache (persist is fire-and-forget;
      *  a storage failure only costs the warm start, so it's swallowed). */
     private setKnownOrgs(orgs: OrgInfo[]) {
-        this.knownOrgs = orgs;
-        this.globalState?.update(ORG_LIST_CACHE_KEY, orgs).then(undefined, () => {});
-        this.onOrgListChangedEmitter.fire(orgs);
+        this.knownOrgs = dedupeOrgInfos(orgs);
+        this.globalState?.update(ORG_LIST_CACHE_KEY, this.knownOrgs).then(undefined, () => {});
+        this.onOrgListChangedEmitter.fire(this.knownOrgs);
     }
 
     /** The cached org list (possibly stale until the next fetch lands). */
