@@ -49,12 +49,32 @@ describe('maybePromptForMetadataReadiness', () => {
             }),
             listOtherCachedOrgKeys: () => [],
         };
-        vscodeMock.window.showInformationMessage.mockResolvedValueOnce('Download Common Metadata');
+        vscodeMock.window.showInformationMessage.mockResolvedValueOnce('Set Up Metadata');
+        vscodeMock.window.showQuickPick.mockResolvedValueOnce({ action: 'common' });
 
         await maybePromptForMetadataReadiness(metadata as any, 'switch');
 
         expect(vscodeMock.window.showInformationMessage).toHaveBeenCalledTimes(1);
         expect(vscodeMock.commands.executeCommand).toHaveBeenCalledWith('soqlEditor.syncCommonMetadata');
+    });
+
+    it('keeps the notification down to two readable buttons', async () => {
+        const metadata = {
+            getCurrentOrgCacheStatus: () => ({
+                hasCache: false,
+                hasObjectList: false,
+                objectFileCount: 0,
+                source: 'none',
+            }),
+            listOtherCachedOrgKeys: () => ['org-a', 'org-b'],
+        };
+        vscodeMock.window.showInformationMessage.mockResolvedValueOnce(undefined);
+
+        await maybePromptForMetadataReadiness(metadata as any, 'switch');
+
+        const [, ...buttons] = vscodeMock.window.showInformationMessage.mock.calls[0];
+        expect(buttons).toEqual(['Set Up Metadata', 'Later']);
+        expect(vscodeMock.window.showQuickPick).not.toHaveBeenCalled();
     });
 
     it('offers local bootstrap for empty cache and reports generated count', async () => {
@@ -69,8 +89,9 @@ describe('maybePromptForMetadataReadiness', () => {
             bootstrapCurrentOrgCacheFromLocalProject: vi.fn(() => 3),
         };
         vscodeMock.window.showInformationMessage
-            .mockResolvedValueOnce('Use Local Repo Metadata')
+            .mockResolvedValueOnce('Set Up Metadata')
             .mockResolvedValue(undefined);
+        vscodeMock.window.showQuickPick.mockResolvedValueOnce({ action: 'local' });
 
         await maybePromptForMetadataReadiness(metadata as any, 'startup');
 

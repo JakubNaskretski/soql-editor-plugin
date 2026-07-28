@@ -273,50 +273,61 @@ export async function maybePromptForMetadataReadiness(
     const status = metadata.getCurrentOrgCacheStatus();
     if (status.hasCache && status.source === 'org') { return; }
 
-    if (status.source === 'local-fallback') {
-        const localTitle = promptType === 'startup'
-            ? 'SOQL Editor: This org is using local-repo generated metadata cache. It may be incomplete for the target org.'
-            : 'SOQL Editor: Active cache source is local-repo metadata for this org and may be inaccurate.';
-        const localChoice = await vscode.window.showInformationMessage(
-            localTitle,
-            'Download Common Metadata',
-            'Download All Metadata',
-            'Keep Local Cache'
-        );
-        if (!localChoice || localChoice === 'Keep Local Cache') { return; }
-        if (localChoice === 'Download Common Metadata') {
-            await vscode.commands.executeCommand('soqlEditor.syncCommonMetadata');
-        } else if (localChoice === 'Download All Metadata') {
-            await vscode.commands.executeCommand('soqlEditor.syncMetadata');
-        }
-        return;
-    }
+    const isLocalFallback = status.source === 'local-fallback';
+    const title = isLocalFallback
+        ? 'SOQL Editor: This org is using local-repo metadata — autocomplete may be inaccurate.'
+        : promptType === 'startup'
+            ? 'SOQL Editor: Metadata cache is empty for this org — autocomplete may be limited.'
+            : 'SOQL Editor: This org has no metadata cache yet — autocomplete may be limited.';
+
+    // ponytail: 2 buttons max. VS Code squeezes notification actions onto one
+    // line and truncates them, so the old 5-action toast was unreadable.
+    // The real choices live in the quick pick below, where they get full labels.
+    const open = await vscode.window.showInformationMessage(title, 'Set Up Metadata', 'Later');
+    if (open !== 'Set Up Metadata') { return; }
 
     const otherCaches = metadata.listOtherCachedOrgKeys();
-    const hasOtherCaches = otherCaches.length > 0;
 
-    const title = promptType === 'startup'
-        ? 'SOQL Editor: Metadata cache is empty for this org. Autocomplete may be limited until metadata is downloaded.'
-        : 'SOQL Editor: This org has no metadata cache yet. Autocomplete may be limited.';
+    const items = [
+        {
+            label: '$(cloud-download) Download common + custom objects',
+            detail: 'Recommended. Standard objects most queries touch, plus every custom object.',
+            action: 'common',
+        },
+        {
+            label: '$(cloud-download) Download all objects',
+            detail: 'Complete, but slow on large orgs.',
+            action: 'all',
+        },
+        ...(isLocalFallback ? [] : [{
+            label: '$(folder) Use local repo metadata',
+            detail: 'Build a cache from SFDX object files in this workspace. No org call.',
+            action: 'local',
+        }]),
+        ...(otherCaches.length > 0 ? [{
+            label: '$(copy) Reuse another org cache',
+            detail: `Copy cached describes from one of ${otherCaches.length} other cached org${otherCaches.length === 1 ? '' : 's'}.`,
+            action: 'reuse',
+        }] : []),
+    ];
 
-    const actions = hasOtherCaches
-        ? ['Download Common Metadata', 'Download All Metadata', 'Use Local Repo Metadata', 'Reuse Other Org Cache', 'Later']
-        : ['Download Common Metadata', 'Download All Metadata', 'Use Local Repo Metadata', 'Later'];
+    const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: 'How should SOQL Editor get metadata for this org?',
+    });
+    const choice = picked?.action;
+    if (!choice) { return; }
 
-    const choice = await vscode.window.showInformationMessage(title, ...actions);
-    if (!choice || choice === 'Later') { return; }
-
-    if (choice === 'Download Common Metadata') {
+    if (choice === 'common') {
         await vscode.commands.executeCommand('soqlEditor.syncCommonMetadata');
         return;
     }
 
-    if (choice === 'Download All Metadata') {
+    if (choice === 'all') {
         await vscode.commands.executeCommand('soqlEditor.syncMetadata');
         return;
     }
 
-    if (choice === 'Use Local Repo Metadata') {
+    if (choice === 'local') {
         const built = metadata.bootstrapCurrentOrgCacheFromLocalProject();
         if (built > 0) {
             vscode.window.showInformationMessage(
@@ -330,7 +341,7 @@ export async function maybePromptForMetadataReadiness(
         return;
     }
 
-    if (choice === 'Reuse Other Org Cache') {
+    if (choice === 'reuse') {
         const picked = await vscode.window.showQuickPick(
             otherCaches.map(key => ({
                 label: key,
