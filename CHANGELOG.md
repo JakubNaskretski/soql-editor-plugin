@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.2
+
+- **The "no metadata cache" prompt is readable again.** Switching to an org
+  without cached metadata used to pop a notification with five buttons crammed
+  onto one line, none of them legible. It now asks once — **Set Up Metadata** or
+  **Later** — and the actual choices (common + custom objects, all objects, local
+  repo metadata, reuse another org's cache) appear in a picker with full names and
+  a line of explanation each.
+
 ## 0.10.0
 
 - **Org picklist in the panel.** The org control at the top of the SOQL panel is
