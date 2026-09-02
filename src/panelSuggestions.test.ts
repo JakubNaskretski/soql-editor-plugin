@@ -92,3 +92,53 @@ describe('panel getSuggestions — object-type coverage', () => {
         expect(labels).toContain('Notes');
     });
 });
+
+describe('panel getSuggestions — inserting between existing fields / quoted values', () => {
+    const account = {
+        name: 'Account',
+        fields: [
+            { name: 'Name', label: 'Name', type: 'string', nillable: true, referenceTo: [], relationshipName: null, picklistValues: [] },
+            { name: 'CreatedDate', label: 'Created', type: 'datetime', nillable: false, referenceTo: [], relationshipName: null, picklistValues: [] },
+        ],
+        childRelationships: [],
+    };
+    const opportunity = {
+        name: 'Opportunity',
+        fields: [
+            { name: 'StageName', label: 'Stage', type: 'picklist', nillable: false, referenceTo: [], relationshipName: null,
+                picklistValues: [{ label: 'Closed Won', value: 'Closed Won' }, { label: 'Prospecting', value: 'Prospecting' }] },
+        ],
+        childRelationships: [],
+    };
+
+    it('suggests while the caret is glued to the next field (SELECT Id, Cr▌Name)', async () => {
+        const text = 'SELECT Id, CrName FROM Account';
+        const suggestions = await getSuggestions(text, text.indexOf('CrName') + 2, makeMetadata({ account }));
+        expect(suggestions.map(s => s.label)).toEqual(['CreatedDate']);
+    });
+
+    it('inserts a bare, filtered picklist value inside an open quote and replaces from the quote', async () => {
+        const text = "SELECT Id FROM Opportunity WHERE StageName = 'Closed W";
+        const suggestions = await getSuggestions(text, text.length, makeMetadata({ opportunity }));
+        expect(suggestions).toEqual([
+            { label: 'Closed Won', detail: 'Closed Won', insertText: 'Closed Won', replaceFrom: text.indexOf("'") + 1 },
+        ]);
+    });
+
+    it('wraps LIKE wildcards around the text typed inside the quote', async () => {
+        const text = "SELECT Id FROM Account WHERE Name LIKE 'Ac";
+        const suggestions = await getSuggestions(text, text.length, makeMetadata({ account }));
+        const from = text.indexOf("'") + 1;
+        expect(suggestions).toEqual([
+            { label: "'%Ac%'", detail: 'Contains', insertText: '%Ac%', replaceFrom: from },
+            { label: "'Ac%'", detail: 'Starts with', insertText: 'Ac%', replaceFrom: from },
+            { label: "'%Ac'", detail: 'Ends with', insertText: '%Ac', replaceFrom: from },
+        ]);
+    });
+
+    it('quotes the picklist value when no quote has been typed yet', async () => {
+        const text = 'SELECT Id FROM Opportunity WHERE StageName = ';
+        const suggestions = await getSuggestions(text, text.length, makeMetadata({ opportunity }));
+        expect(suggestions.map(s => s.insertText)).toEqual(["'Closed Won'", "'Prospecting'"]);
+    });
+});

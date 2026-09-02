@@ -1,6 +1,6 @@
 /** Computes context-aware autocomplete suggestions for the sidebar editor. */
 import { MetadataProvider, typingDescribeOptions } from './metadataProvider';
-import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset, ScopedFromInfo } from './soqlParser';
+import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset, openStringStart, ScopedFromInfo } from './soqlParser';
 import { resolveRelationshipChain } from './relationshipChain';
 import { FieldUsage, isFieldUsableIn } from './soqlCatalog';
 
@@ -8,6 +8,9 @@ export interface Suggestion {
     label: string;
     detail: string;
     insertText: string;
+    /** Absolute offset the replacement starts at (default: start of the
+     *  identifier before the caret). Set for values typed inside a quote. */
+    replaceFrom?: number;
 }
 
 const IDENTIFIER_CHAR_RE = /[A-Za-z0-9_.]/;
@@ -32,10 +35,6 @@ function getWordAtCursor(text: string, offset: number): { word: string; start: n
         start,
         end,
     };
-}
-
-function isCursorInsideIdentifier(text: string, offset: number): boolean {
-    return isIdentifierChar(text[offset - 1]) && isIdentifierChar(text[offset]);
 }
 
 /**
@@ -251,12 +250,9 @@ export async function getSuggestions(
     offset: number,
     metadata: MetadataProvider,
 ): Promise<Suggestion[]> {
-    // Do not suggest while cursor is in the middle of an existing token.
-    // This avoids noisy suggestions and bad replacement behavior.
-    if (isCursorInsideIdentifier(text, offset)) {
-        return [];
-    }
-
+    // The caret may sit in the middle of a token (`SELECT Id, Cr▌Name`): the
+    // partial is what precedes it and the webview replaces only that part, so
+    // inserting a field in front of an existing one works like VS Code's editor.
     const ctx = getQueryContext(text, offset);
     let suggestions: Suggestion[] = [];
     const wordAtCursor = getWordAtCursor(text, offset);
@@ -317,6 +313,15 @@ export async function getSuggestions(
         }
         case 'where_value': {
             const obj = contextObject;
+            // Inside an open quote (`= 'Clo▌`) the value goes in bare and replaces
+            // everything typed since the quote; otherwise it is inserted quoted.
+            const beforeRaw = text.substring(0, offset);
+            const openQuote = openStringStart(beforeRaw, beforeRaw.length);
+            const typedRaw = openQuote >= 0 ? beforeRaw.slice(openQuote) : ctx.partial;
+            const typed = typedRaw.toLowerCase();
+            const asValue = (label: string, detail: string, value: string): Suggestion => openQuote >= 0
+                ? { label, detail, insertText: value, replaceFrom: openQuote }
+                : { label, detail, insertText: `'${value}'` };
             if (obj) {
                 // Resolve a possibly relationship-qualified field path (e.g.
                 // Account.Industry on Contact) to the target object's field so its
@@ -329,21 +334,20 @@ export async function getSuggestions(
                     const leaf = segments[segments.length - 1].toLowerCase();
                     const field = desc.fields.find(f => f.name.toLowerCase() === leaf);
                     if (field && field.picklistValues.length > 0) {
-                        suggestions = field.picklistValues.map(pv => ({
-                            label: pv.label,
-                            detail: pv.value,
-                            insertText: `'${pv.value}'`,
-                        }));
+                        suggestions = field.picklistValues
+                            .filter(pv => !typed || pv.value.toLowerCase().includes(typed) || pv.label.toLowerCase().includes(typed))
+                            .map(pv => asValue(pv.label, pv.value, pv.value));
                     }
                 }
             }
-            // Check if we're after LIKE — offer wildcard patterns
+            // After LIKE — offer wildcard patterns wrapped around what was typed
+            // so far (`LIKE 'Ac▌` → `%Ac%`, `Ac%`, `%Ac`).
             const beforeCursor = text.substring(0, offset).toUpperCase();
             if (/LIKE\s*$/i.test(beforeCursor) || /LIKE\s+'[^']*$/i.test(beforeCursor)) {
                 const wildcardSuggestions: Suggestion[] = [
-                    { label: "'%value%'", detail: 'Contains', insertText: "'%'" },
-                    { label: "'value%'", detail: 'Starts with', insertText: "''" },
-                    { label: "'%value'", detail: 'Ends with', insertText: "'%'" },
+                    asValue(`'%${typedRaw}%'`, 'Contains', `%${typedRaw}%`),
+                    asValue(`'${typedRaw}%'`, 'Starts with', `${typedRaw}%`),
+                    asValue(`'%${typedRaw}'`, 'Ends with', `%${typedRaw}`),
                 ];
                 suggestions = [...wildcardSuggestions, ...suggestions];
             }
@@ -476,7 +480,13 @@ function extractLastFromObject(text: string): string | undefined {
     return last;
 }
 
-async function resolveContextObject(
+/**
+ * SObject for the query scope at `offset`: the FROM object at top level, or a
+ * subquery's child relationship resolved through its parent's describe (memoized
+ * per scope, recursing on the parent scope itself). Shared with the editor
+ * engine so both surfaces resolve nested subqueries identically.
+ */
+export async function resolveContextObject(
     text: string,
     offset: number,
     metadata: MetadataProvider

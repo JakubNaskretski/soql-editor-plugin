@@ -51,6 +51,16 @@ export function getQueryContext(text: string, offset: number): QueryContext {
     const partialMatch = beforeRaw.match(/[a-zA-Z_][a-zA-Z0-9_.]*$/);
     const partial = partialMatch ? partialMatch[0] : '';
 
+    // WHERE value: `field <op> value▌`, anchored to the CURRENT condition
+    // (everything after the last top-level WHERE/AND/OR) so a multi-condition
+    // clause resolves the field next to the cursor. Decided first because an
+    // open string literal (`= 'Closed W▌`, `= 'LIMIT ▌`) must stay a value no
+    // matter which clause keyword the quoted text happens to contain.
+    const whereValue = detectWhereValue(beforeRaw, partial);
+    if (isInsideStringLiteral(beforeRaw, beforeRaw.length)) {
+        return whereValue ?? { type: 'unknown' };
+    }
+
     // Check FOR clause
     if (/FOR\s+[A-Z_]*$/i.test(before)) {
         return { type: 'for_clause', partial };
@@ -71,66 +81,58 @@ export function getQueryContext(text: string, offset: number): QueryContext {
         return { type: 'limit_value', partial };
     }
 
-    // Check ORDER BY null ordering
-    if (/ORDER\s+BY\s+[^)]*\s+NULLS\s+[A-Z]*$/i.test(before)) {
-        return { type: 'nulls_order', partial };
-    }
-
-    // Check ORDER BY direction vs. field. ORDER BY can sort on several fields
-    // (`ORDER BY Name, CreatedDate DESC`), so only the CURRENT sort segment
-    // (after the last comma) decides: a completed field token + whitespace means
-    // we're choosing ASC/DESC; otherwise we're still typing a field name.
-    const orderTail = beforeRaw.match(/ORDER\s+BY\s+([^)]*)$/i)?.[1];
+    // Clause tails are located with string-aware keyword hits that belong to the
+    // cursor's own query scope (same depth as, and after, that scope's SELECT):
+    // a ')' earlier in the list (CALENDAR_YEAR(CreatedDate), COUNT(Id) > 1) can't
+    // cut the clause off, the cursor may sit inside a function call in the clause
+    // (HAVING SUM(Amou▌), and a subquery's ORDER BY can never claim an outer
+    // cursor. HAVING is checked before GROUP BY because it follows it.
+    const depth = getQueryDepthAtOffset(text, offset);
+    const scope = findCurrentSelectToken(text, scanSelectFromTokens(text), offset, depth);
+    const tailAfter = (phrase: string): string | undefined => {
+        const hits = findKeywordHits(beforeRaw, phrase).filter(h =>
+            scope ? h.depth === scope.depth && h.index > scope.index : h.depth === depth
+        );
+        const last = hits[hits.length - 1];
+        // `ORDER BY▌` (keyword still being typed) is not yet a clause tail.
+        return last && last.index + last.length < beforeRaw.length
+            ? beforeRaw.slice(last.index + last.length)
+            : undefined;
+    };
+    const orderTail = tailAfter('ORDER BY');
     if (orderTail !== undefined) {
+        if (/\sNULLS\s+[A-Za-z]*$/i.test(orderTail)) {
+            return { type: 'nulls_order', partial };
+        }
+        // ORDER BY can sort on several fields (`ORDER BY Name, CreatedDate DESC`),
+        // so only the CURRENT sort segment (after the last comma) decides: a
+        // completed direction (+ optional NULLS) means the next clause; a completed
+        // field token + whitespace means ASC/DESC; otherwise a field name.
         const segment = orderTail.split(',').pop() ?? orderTail;
-        if (/^\s*[\w.]+\s+[A-Za-z]*$/.test(segment)) {
+        if (/\s(?:ASC|DESC)(?:\s+NULLS\s+(?:FIRST|LAST))?\s+[A-Za-z_]*$/i.test(segment)) {
+            return { type: 'tail_clause', partial };
+        }
+        if (/^\s*[\w.()]+\s+[A-Za-z]*$/.test(segment)) {
             return { type: 'order_direction', partial };
         }
         return { type: 'order_by', partial };
     }
-
-    // Check HAVING clause — suggest aggregate functions and fields.
-    // Must run BEFORE the GROUP BY check: `GROUP BY X HAVING Amo▌` matches the
-    // greedy GROUP BY pattern too, but the cursor is in the HAVING clause.
-    if (/HAVING\s+[^)]*$/i.test(before)) {
+    if (tailAfter('HAVING') !== undefined) {
         return { type: 'having', partial };
     }
-
-    // Check GROUP BY
-    if (/GROUP\s+BY\s+[^)]*$/i.test(before)) {
+    if (tailAfter('GROUP BY') !== undefined) {
         return { type: 'group_by', partial };
     }
 
-    // Check WHERE clause — are we after an operator (typing a value)?
-    // Anchor to the CURRENT condition (everything after the last top-level
-    // WHERE/AND/OR), so a multi-condition clause resolves the field next to the
-    // cursor instead of the first field in the WHERE clause.
-    const lastConditionStart = findLastConditionStart(beforeRaw);
-    if (lastConditionStart >= 0) {
-        const condition = beforeRaw.slice(lastConditionStart);
-        // field <op> value. Operator alternation orders multi-char and word
-        // operators before their prefixes (INCLUDES before IN, >= before >) and
-        // word-bounds the word operators so `IN` doesn't match inside `INCLUDES`.
-        const opMatch = condition.match(
-            /^\s*([A-Za-z_][\w.]*)\s*(<=|>=|<>|!=|=|<|>|\bLIKE\b|\bNOT\s+IN\b|\bINCLUDES\b|\bEXCLUDES\b|\bIN\b)\s*([\s\S]*)$/i
-        );
-        if (opMatch) {
-            const fieldName = opMatch[1];
-            const valuePart = opMatch[3] ?? '';
-            const hasTrailingWhitespace = /\s$/.test(beforeRaw);
-            const hasStartedValue = valuePart.trim().length > 0;
-            const valueTrimmedEnd = valuePart.replace(/\s+$/, '');
-            const startedNextWord = /\s+[A-Za-z_]*$/.test(valueTrimmedEnd);
-            // If the value is complete and the cursor moved to the next token,
-            // fall through to the clause/field transition checks below.
-            if (!((hasTrailingWhitespace && hasStartedValue) || startedNextWord)) {
-                return { type: 'where_value', field: fieldName, partial };
-            }
-        }
+    if (whereValue) {
+        return whereValue;
     }
 
+    // The WHERE/AND/OR keyword tests below are word-bounded: `Brand`, `Vendor`,
+    // `Floor` end in AND/OR and used to turn a SELECT field or FROM object into a
+    // WHERE condition.
     // Check WHERE clause — field typed, waiting for operator (e.g. "WHERE Name ▌")
-    const whereOpMatch = before.match(/(?:WHERE|AND|OR)\s+(\w[\w.]*)\s+([A-Z]*)$/i);
+    const whereOpMatch = before.match(/(?:^|\W)(?:WHERE|AND|OR)\s+(\w[\w.]*)\s+([A-Z]*)$/i);
     if (whereOpMatch) {
         const fieldName = whereOpMatch[1];
         const opPartial = whereOpMatch[2] || '';
@@ -142,12 +144,12 @@ export function getQueryContext(text: string, offset: number): QueryContext {
     }
 
     // Check WHERE clause — just after WHERE/AND/OR keyword, starting a new condition
-    if (/(?:WHERE|AND|OR)\s*$/i.test(beforeRaw)) {
+    if (/(?:^|\W)(?:WHERE|AND|OR)\s*$/i.test(beforeRaw)) {
         return { type: 'where_field', partial };
     }
 
     // Check WHERE clause — typing the field token of a new condition
-    if (/(?:WHERE|AND|OR)\s+[A-Za-z_][A-Za-z0-9_.]*$/i.test(beforeRaw)) {
+    if (/(?:^|\W)(?:WHERE|AND|OR)\s+[A-Za-z_][A-Za-z0-9_.]*$/i.test(beforeRaw)) {
         return { type: 'where_field', partial };
     }
 
@@ -178,6 +180,59 @@ export function getQueryContext(text: string, offset: number): QueryContext {
 }
 
 /**
+ * `field <op> value▌` in the current WHERE condition, or undefined when the
+ * cursor is not (or no longer) in a value position. Operator alternation orders
+ * multi-char and word operators before their prefixes (INCLUDES before IN,
+ * >= before >) and word-bounds the word operators so `IN` doesn't match inside
+ * `INCLUDES`.
+ */
+function detectWhereValue(beforeRaw: string, partial: string): QueryContext | undefined {
+    const lastConditionStart = findLastConditionStart(beforeRaw);
+    if (lastConditionStart < 0) {
+        return undefined;
+    }
+    const opMatch = beforeRaw.slice(lastConditionStart).match(
+        /^\s*([A-Za-z_][\w.]*)\s*(<=|>=|<>|!=|=|<|>|\bLIKE\b|\bNOT\s+IN\b|\bINCLUDES\b|\bEXCLUDES\b|\bIN\b)\s*([\s\S]*)$/i
+    );
+    if (!opMatch) {
+        return undefined;
+    }
+    const fieldName = opMatch[1];
+    const valuePart = opMatch[3] ?? '';
+    if (isInsideStringLiteral(valuePart, valuePart.length)) {
+        return { type: 'where_value', field: fieldName, partial };
+    }
+    const hasTrailingWhitespace = /\s$/.test(beforeRaw);
+    const hasStartedValue = valuePart.trim().length > 0;
+    const valueTrimmedEnd = valuePart.replace(/\s+$/, '');
+    const startedNextWord = /\s+[A-Za-z_]*$/.test(valueTrimmedEnd);
+    // Value complete and the cursor moved on to the next token → not a value.
+    if ((hasTrailingWhitespace && hasStartedValue) || startedNextWord) {
+        return undefined;
+    }
+    return { type: 'where_value', field: fieldName, partial };
+}
+
+/**
+ * Index just after the (unescaped) quote that opens the string literal
+ * containing `offset`, or -1 when `offset` is not inside a string literal.
+ */
+export function openStringStart(text: string, offset: number): number {
+    let start = -1;
+    for (let i = 0; i < offset && i < text.length; i++) {
+        if (text[i] === "'" && !isEscapedQuote(text, i)) {
+            start = start < 0 ? i + 1 : -1;
+        }
+    }
+    return start;
+}
+
+/** True when `offset` is inside an unclosed single-quoted string literal. */
+export function isInsideStringLiteral(text: string, offset: number): boolean {
+    return openStringStart(text, offset) >= 0;
+}
+
+/**
  * True when `offset` sits inside a SELECT field list — i.e. after the SELECT
  * keyword of its current query scope and at/before that scope's FROM (or that
  * scope has no FROM yet). Subquery-aware via parenthesis depth, so it correctly
@@ -187,7 +242,7 @@ function isInSelectClause(text: string, offset: number): boolean {
     const safeOffset = Math.max(0, Math.min(offset, text.length));
     const depth = getQueryDepthAtOffset(text, safeOffset);
     const tokens = scanSelectFromTokens(text);
-    const selectTok = findCurrentSelectToken(tokens, safeOffset, depth);
+    const selectTok = findCurrentSelectToken(text, tokens, safeOffset, depth);
     if (!selectTok || selectTok.index >= safeOffset) {
         return false;
     }
@@ -232,7 +287,7 @@ export function extractScopedFromInfo(text: string, offset: number): ScopedFromI
     const tokens = scanSelectFromTokens(text);
     const currentDepth = getQueryDepthAtOffset(text, safeOffset);
 
-    const selectToken = findCurrentSelectToken(tokens, safeOffset, currentDepth);
+    const selectToken = findCurrentSelectToken(text, tokens, safeOffset, currentDepth);
     if (!selectToken) {
         return undefined;
     }
@@ -322,19 +377,47 @@ export function getQueryDepthAtOffset(text: string, offset: number): number {
     return depth;
 }
 
+/**
+ * The SELECT that owns the scope at `offset`: the nearest preceding SELECT whose
+ * parentheses are still open at the cursor. Prefers one at the cursor's own
+ * depth; otherwise the enclosing scope (cursor inside a function call). A
+ * closed sibling subquery (`SELECT Id, (SELECT … FROM Contacts), toLabel(Sta▌)`)
+ * is never picked even though it sits at the same depth as the function parens.
+ */
 function findCurrentSelectToken(
+    text: string,
     tokens: Array<{ keyword: 'SELECT' | 'FROM'; index: number; depth: number }>,
     offset: number,
     depth: number
 ): { keyword: 'SELECT' | 'FROM'; index: number; depth: number } | undefined {
-    const sameDepthList = tokens.filter(t => t.keyword === 'SELECT' && t.index < offset && t.depth === depth);
-    const sameDepth = sameDepthList.length > 0 ? sameDepthList[sameDepthList.length - 1] : undefined;
-    if (sameDepth) {
-        return sameDepth;
+    const open = tokens.filter(t =>
+        t.keyword === 'SELECT' && t.index < offset && isScopeOpen(text, t.index, offset, t.depth)
+    );
+    const sameDepth = open.filter(t => t.depth === depth);
+    const candidates = sameDepth.length > 0 ? sameDepth : open;
+    return candidates[candidates.length - 1];
+}
+
+/** False once the paren depth drops below `depth` anywhere in [from, to). */
+function isScopeOpen(text: string, from: number, to: number, depth: number): boolean {
+    let current = depth;
+    let inString = false;
+    for (let i = from; i < to && i < text.length; i++) {
+        const ch = text[i];
+        if (ch === "'" && !isEscapedQuote(text, i)) {
+            inString = !inString;
+            continue;
+        }
+        if (inString) {
+            continue;
+        }
+        if (ch === '(') {
+            current++;
+        } else if (ch === ')' && --current < depth) {
+            return false;
+        }
     }
-    // Fallback for cases where cursor sits exactly on/near scope boundaries.
-    const anyDepth = tokens.filter(t => t.keyword === 'SELECT' && t.index < offset);
-    return anyDepth.length > 0 ? anyDepth[anyDepth.length - 1] : undefined;
+    return true;
 }
 
 /**
@@ -635,9 +718,12 @@ export function validateSoqlStructure(text: string): SoqlError[] {
         });
     };
 
-    // Check unmatched parentheses
+    // Check unmatched parentheses (string-aware: `WHERE Name = ')'` is valid)
     let depth = 0;
+    let inStr = false;
     for (let i = 0; i < text.length; i++) {
+        if (text[i] === "'" && !isEscapedQuote(text, i)) { inStr = !inStr; continue; }
+        if (inStr) { continue; }
         if (text[i] === '(') { depth++; }
         if (text[i] === ')') { depth--; }
         if (depth < 0) {

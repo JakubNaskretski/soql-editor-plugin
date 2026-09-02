@@ -4,6 +4,7 @@ import {
     extractScopedFromInfo,
     extractSelectFields,
     getQueryContext,
+    openStringStart,
     validateSoqlStructure,
 } from './soqlParser';
 
@@ -289,5 +290,78 @@ describe('getQueryContext — subquery & multi-clause awareness', () => {
     it('keeps the relationship prefix on the WHERE value field', () => {
         const query = 'SELECT Id FROM Contact WHERE Account.Industry = ';
         expect(getQueryContext(query, query.length)).toEqual({ type: 'where_value', field: 'Account.Industry', partial: '' });
+    });
+});
+
+describe('getQueryContext — cursor inside an existing query', () => {
+    const at = (q: string) => getQueryContext(q.replace('▌', ''), q.indexOf('▌'));
+
+    it.each([
+        ['SELECT Id, Prior▌, Name FROM Account', 'select_fields', 'Prior'],
+        ['SELECT Id, Brand▌Name FROM Account', 'select_fields', 'Brand'],
+        ['SELECT Id, Vendor Name▌ FROM Account', 'select_fields', 'Name'],
+        ['SELECT Id FROM Vendor▌', 'from_object', 'Vendor'],
+    ])('does not read an identifier ending in AND/OR as a WHERE condition: %s', (q, type, partial) => {
+        expect(at(q)).toEqual({ type, partial });
+    });
+
+    it('keeps ORDER BY / GROUP BY / HAVING context after a function call in the list', () => {
+        expect(at('SELECT Id FROM Account ORDER BY CALENDAR_YEAR(CreatedDate), Na▌')).toEqual({ type: 'order_by', partial: 'Na' });
+        expect(at('SELECT COUNT(Id) FROM Account GROUP BY CALENDAR_YEAR(CreatedDate), Sta▌')).toEqual({ type: 'group_by', partial: 'Sta' });
+        expect(at('SELECT COUNT(Id) FROM Account GROUP BY Industry HAVING COUNT(Id) > 1 AND Na▌').type).toBe('having');
+        expect(at('SELECT Id FROM Account ORDER BY CALENDAR_YEAR(CreatedDate) ▌').type).toBe('order_direction');
+    });
+
+    it('keeps the clause context while the cursor is inside a function call in that clause', () => {
+        expect(at('SELECT COUNT(Id) FROM Opportunity GROUP BY StageName HAVING SUM(Amoun▌').type).toBe('having');
+        expect(at('SELECT COUNT(Id) FROM Account GROUP BY CALENDAR_YEAR(Crea▌')).toEqual({ type: 'group_by', partial: 'Crea' });
+        expect(at('SELECT Id FROM Account ORDER BY CALENDAR_YEAR(Crea▌')).toEqual({ type: 'order_by', partial: 'Crea' });
+        // ...but an earlier sibling subquery's ORDER BY (same depth as the function
+        // parens) still belongs to that subquery, not to the outer SELECT list.
+        expect(at('SELECT Id, (SELECT Id FROM Contacts ORDER BY Name), toLabel(Sta▌) FROM Account').type).toBe('select_fields');
+    });
+
+    it('resolves the outer scope inside a function that follows a closed subquery', () => {
+        const query = 'SELECT Id, (SELECT Id FROM Contacts), toLabel(Sta) FROM Account';
+        const cursor = query.indexOf('Sta') + 3;
+        expect(getQueryContext(query, cursor)).toEqual({ type: 'select_fields', partial: 'Sta' });
+        expect(extractScopedFromInfo(query, cursor)?.fromName).toBe('Account');
+    });
+
+    it("does not let a subquery's ORDER BY claim the outer SELECT list", () => {
+        expect(at('SELECT Id, (SELECT Id FROM Contacts ORDER BY Name), Na▌ FROM Account').type).toBe('select_fields');
+        expect(at('SELECT Id, (SELECT Id FROM Contacts ORDER BY Na▌) FROM Account').type).toBe('order_by');
+    });
+
+    it('offers the next clause once a sort direction is complete', () => {
+        expect(at('SELECT Id FROM Account ORDER BY Name DESC ▌').type).toBe('tail_clause');
+        expect(at('SELECT Id FROM Account ORDER BY Name DESC NULLS LAST ▌').type).toBe('tail_clause');
+        expect(at('SELECT Id FROM Account ORDER BY Name DESC NULLS ▌').type).toBe('nulls_order');
+        expect(at('SELECT Id FROM Account ORDER BY▌').type).toBe('tail_clause');
+    });
+
+    it('stays in where_value while typing a quoted value, even one with spaces or keywords', () => {
+        expect(at("SELECT Id FROM Opportunity WHERE StageName = 'Closed W▌")).toEqual({ type: 'where_value', field: 'StageName', partial: 'W' });
+        expect(at("SELECT Id FROM Account WHERE Name = 'LIMIT ▌").type).toBe('where_value');
+    });
+
+    it('still classifies plain insert-between-fields positions as SELECT fields', () => {
+        expect(at('SELECT Id, Cr▌Name FROM Account')).toEqual({ type: 'select_fields', partial: 'Cr' });
+        expect(at('SELECT Id,▌Name FROM Account')).toEqual({ type: 'select_fields', partial: '' });
+    });
+});
+
+describe('openStringStart', () => {
+    it('is escape-aware and returns the index after the opening quote', () => {
+        const text = "WHERE Name = 'O\\'Bri";
+        expect(openStringStart(text, text.length)).toBe(text.indexOf("'") + 1);
+        expect(openStringStart("WHERE Name = 'x' AND ", 21)).toBe(-1);
+    });
+});
+
+describe('validateSoqlStructure — parentheses inside string literals', () => {
+    it('does not count parentheses inside string literals', () => {
+        expect(validateSoqlStructure("SELECT Id FROM Account WHERE Name = ')'")).toEqual([]);
+        expect(validateSoqlStructure("SELECT Id FROM Account WHERE Name = '(' AND Type = 'x'")).toEqual([]);
     });
 });

@@ -60,3 +60,20 @@ describe('query safety helpers', () => {
         expect(shouldPromptForCount(100, 500)).toBe(false);
     });
 });
+
+describe('applyLimit clause order', () => {
+    it('places LIMIT before a top-level OFFSET', () => {
+        expect(applyLimit('SELECT Id FROM Account OFFSET 10', 200)).toBe('SELECT Id FROM Account LIMIT 200 OFFSET 10');
+    });
+
+    it('places LIMIT before FOR UPDATE / FOR VIEW', () => {
+        expect(applyLimit('SELECT Id FROM Account FOR UPDATE', 200)).toBe('SELECT Id FROM Account LIMIT 200 FOR UPDATE');
+        expect(applyLimit('SELECT Id FROM Account WHERE Name = \'x\' FOR VIEW', 5)).toBe('SELECT Id FROM Account WHERE Name = \'x\' LIMIT 5 FOR VIEW');
+    });
+
+    it('does not mistake FORMAT() or a subquery OFFSET for the clause', () => {
+        expect(applyLimit('SELECT FORMAT(Amount) FROM Opportunity', 10)).toBe('SELECT FORMAT(Amount) FROM Opportunity LIMIT 10');
+        expect(applyLimit('SELECT Id, (SELECT Id FROM Contacts OFFSET 1) FROM Account', 10))
+            .toBe('SELECT Id, (SELECT Id FROM Contacts OFFSET 1) FROM Account LIMIT 10');
+    });
+});

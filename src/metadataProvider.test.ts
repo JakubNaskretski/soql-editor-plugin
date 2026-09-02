@@ -457,3 +457,24 @@ describe('typingDescribeOptions', () => {
         expect(opts.signal?.aborted).toBe(false);
     });
 });
+
+describe('describeSObject — shared live describe while typing', () => {
+    it('joins concurrent typing callers on one CLI run that no caller signal can abort', async () => {
+        const { provider, sfCli } = createProvider({ describes: { Account: makeDescribe('Account', ['Id', 'Name']) } });
+        let cancelFirst: (() => void) | undefined;
+        const tokenA = {
+            isCancellationRequested: false,
+            onCancellationRequested: (cb: () => void) => { cancelFirst = cb; return { dispose() {} }; },
+        };
+        const first = provider.describeSObject('Account', typingDescribeOptions(tokenA));
+        const second = provider.describeSObject('Account', typingDescribeOptions({ isCancellationRequested: false }));
+        // VS Code cancels completion request A the moment request B is typed.
+        cancelFirst?.();
+        const [a, b] = await Promise.all([first, second]);
+
+        expect(sfCli.describeSObject).toHaveBeenCalledTimes(1);
+        expect((sfCli.describeSObject as any).mock.calls[0][1]?.signal).toBeUndefined();
+        expect(a?.name).toBe('Account');
+        expect(b?.name).toBe('Account');
+    });
+});

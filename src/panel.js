@@ -557,14 +557,6 @@
     function requestSuggestions() {
         const offset = input.selectionStart || 0;
         const text = input.value;
-        const prevChar = offset > 0 ? text[offset - 1] : '';
-        const nextChar = offset < text.length ? text[offset] : '';
-        const idCharRe = /[A-Za-z0-9_.]/;
-        // Do not suggest while editing in the middle of a token.
-        if (idCharRe.test(prevChar) && idCharRe.test(nextChar)) {
-            hideDropdown();
-            return;
-        }
         lastCursorPos = offset;
         lastSuggestionRequest = { text, offset };
         vscode.postMessage({ type: 'requestSuggestions', text, offset });
@@ -579,16 +571,26 @@
         const offset = input.selectionStart || 0;
         const idCharRe = /[A-Za-z0-9_.]/;
 
-        // Replace the full token around the cursor (left + right),
-        // so accepting a suggestion in mid-word never leaves stale suffix text.
+        // Replace only what was typed before the caret (VS Code "insert"
+        // semantics), so a field inserted in front of an existing one keeps it:
+        // `Cr▌Name` + CreatedDate → `CreatedDateName`, never `CreatedDate`. The
+        // identifier after the caret is consumed only when the suggestion already
+        // spells it out (`Na▌me` + Name → `Name`, not `Nameme`). A value typed
+        // inside a quote replaces from the quote (item.replaceFrom).
         let start = offset;
-        while (start > 0 && idCharRe.test(text[start - 1])) {
-            start--;
+        if (typeof item.replaceFrom === 'number') {
+            start = item.replaceFrom;
+        } else {
+            while (start > 0 && idCharRe.test(text[start - 1])) {
+                start--;
+            }
         }
-        let end = offset;
-        while (end < text.length && idCharRe.test(text[end])) {
-            end++;
+        let wordEnd = offset;
+        while (wordEnd < text.length && idCharRe.test(text[wordEnd])) {
+            wordEnd++;
         }
+        const wholeWord = text.substring(start, wordEnd).toLowerCase();
+        const end = wordEnd > offset && item.insertText.toLowerCase().startsWith(wholeWord) ? wordEnd : offset;
 
         const newText = text.substring(0, start) + item.insertText + text.substring(end);
         input.value = newText;

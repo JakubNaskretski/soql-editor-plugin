@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
-import { getQueryContext, extractFromObject, extractScopedFromInfo, getQueryDepthAtOffset, ScopedFromInfo } from './soqlParser';
+import { getQueryContext, extractScopedFromInfo, isInsideStringLiteral, openStringStart, QueryContext, ScopedFromInfo } from './soqlParser';
 import { MetadataProvider, typingDescribeOptions } from './metadataProvider';
 import { resolveRelationshipChain } from './relationshipChain';
-import { getSubqueryFromSuggestions } from './panelSuggestions';
+import { getSubqueryFromSuggestions, resolveContextObject } from './panelSuggestions';
 import {
     FieldUsage,
     isFieldUsableIn,
@@ -37,11 +37,49 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         position: vscode.Position,
         token: vscode.CancellationToken,
         _context: vscode.CompletionContext
-    ): Promise<vscode.CompletionItem[]> {
+    ): Promise<vscode.CompletionList> {
         const text = document.getText();
         const offset = document.offsetAt(position);
         const ctx = getQueryContext(text, offset);
+        const items = await this.itemsFor(ctx, text, offset, token);
 
+        // Explicit range: replace only what was typed before the caret for this
+        // token — the last dot-segment of a relationship path, the digits of a
+        // LIMIT, or the text since an opening quote. Without it VS Code falls back
+        // to the language wordPattern, which spans dots, so `Owner.Na` became the
+        // filter word and every bare field label ("Name") was filtered out.
+        const range = new vscode.Range(document.positionAt(this.replaceStart(ctx, text, offset)), position);
+        for (const item of items) {
+            item.range = range;
+        }
+        // isIncomplete: field/object lists are capped and gated on the partial, so
+        // VS Code must re-query on each keystroke rather than refilter a truncated
+        // list client-side — that emptied (and cancelled) the session when typing
+        // in front of an existing field, where quick-suggest cannot restart it.
+        return new vscode.CompletionList(items, true);
+    }
+
+    private replaceStart(ctx: QueryContext, text: string, offset: number): number {
+        const beforeRaw = text.substring(0, offset);
+        if (ctx.type === 'limit_value' || ctx.type === 'offset_value') {
+            return offset - (beforeRaw.match(/\d*$/)?.[0].length ?? 0);
+        }
+        if (ctx.type === 'where_value') {
+            const quoteStart = openStringStart(beforeRaw, beforeRaw.length);
+            if (quoteStart >= 0) { return quoteStart; }
+        }
+        // `unknown` has no partial (e.g. `SEL▌` before any SELECT exists): still
+        // replace the identifier before the caret so keywords don't duplicate it.
+        const partial = 'partial' in ctx ? ctx.partial : (beforeRaw.match(/[A-Za-z_][A-Za-z0-9_]*$/)?.[0] ?? '');
+        return offset - (partial.split('.').pop() ?? '').length;
+    }
+
+    private async itemsFor(
+        ctx: QueryContext,
+        text: string,
+        offset: number,
+        token: vscode.CancellationToken
+    ): Promise<vscode.CompletionItem[]> {
         switch (ctx.type) {
             case 'from_object': {
                 // Inside a subquery, FROM takes a child RELATIONSHIP name
@@ -131,7 +169,7 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
         usage: FieldUsage = 'select',
         token?: vscode.CancellationToken
     ): Promise<vscode.CompletionItem[]> {
-        const objectName = await this.resolveScopedObject(queryText, offset);
+        const objectName = await resolveContextObject(queryText, offset, this.metadata);
         if (!objectName || token?.isCancellationRequested) {
             return [];
         }
@@ -341,11 +379,17 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
     }
 
     private async getValueCompletions(queryText: string, offset: number, fieldName: string): Promise<vscode.CompletionItem[]> {
-        const objectName = await this.resolveScopedObject(queryText, offset);
+        const objectName = await resolveContextObject(queryText, offset, this.metadata);
         if (!objectName) { return []; }
 
+        // Inside an open quote (`= 'Tec▌`) the value is inserted bare — the range
+        // already covers the typed text since the quote and the editor may have
+        // auto-closed the pair — and literals (TRUE, TODAY) don't apply.
+        const beforeRaw = queryText.substring(0, offset);
+        const inQuote = isInsideStringLiteral(beforeRaw, beforeRaw.length);
         const field = await this.resolveFieldForValue(objectName, fieldName);
         if (!field) {
+            if (inQuote) { return []; }
             return this.getKeywordItems(
                 [...SOQL_BOOLEAN_LITERALS, ...SOQL_DATE_LITERALS],
                 vscode.CompletionItemKind.Value
@@ -360,9 +404,12 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
                     vscode.CompletionItemKind.EnumMember
                 );
                 item.detail = pv.value;
-                item.insertText = `'${pv.value}'`;
+                item.insertText = inQuote ? pv.value : `'${pv.value}'`;
                 return item;
             }));
+        }
+        if (inQuote) {
+            return items;
         }
 
         items.push(...this.getKeywordItems([...SOQL_BOOLEAN_LITERALS], vscode.CompletionItemKind.Value));
@@ -421,44 +468,6 @@ export class SoqlCompletionProvider implements vscode.CompletionItemProvider {
             item.sortText = String(i).padStart(4, '0');
             return item;
         });
-    }
-
-    /**
-     * Resolve the SObject name for the query scope at the given cursor offset.
-     * - Top-level scope returns the FROM SObject directly.
-     * - Subquery scope (depth > 0) resolves the relationship name through the
-     *   parent's childRelationships to find the actual child SObject.
-     * - When inside a subquery scope but the parent SObject is unknown,
-     *   returns undefined to avoid suggesting fields from the wrong object.
-     */
-    private async resolveScopedObject(text: string, offset: number): Promise<string | undefined> {
-        const scoped = extractScopedFromInfo(text, offset);
-        if (!scoped) {
-            if (getQueryDepthAtOffset(text, offset) > 0) {
-                return undefined;
-            }
-            return extractFromObject(text);
-        }
-        if (scoped.depth <= 0) {
-            return scoped.fromName;
-        }
-        const parentScoped = extractScopedFromInfo(text, scoped.selectIndex);
-        if (!parentScoped) {
-            return scoped.fromName;
-        }
-        const parentObj = parentScoped.depth <= 0
-            ? parentScoped.fromName
-            : await this.resolveScopedObject(text, parentScoped.selectIndex);
-        if (!parentObj) {
-            return scoped.fromName;
-        }
-        // No token in scope here (called from several paths); still cap the
-        // describe timeout so subquery-parent resolution can't hang a keystroke.
-        const parentDescribe = await this.metadata.describeSObject(parentObj, typingDescribeOptions());
-        const childRel = parentDescribe?.childRelationships.find(
-            rel => rel.relationshipName?.toLowerCase() === scoped.fromName.toLowerCase()
-        );
-        return childRel?.childSObject || scoped.fromName;
     }
 
     private getTailClauseCompletions(partial: string): vscode.CompletionItem[] {
