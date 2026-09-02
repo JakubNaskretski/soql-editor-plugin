@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.3
+
+- **Autocomplete works when you insert a field between existing ones.** Typing a
+  new field right in front of another one (`SELECT Id, Cr|Name`) now suggests in
+  both the sidebar and `.soql` files — before, the sidebar stayed silent and the
+  editor's list emptied after a letter or two. Accepting a suggestion no longer
+  overwrites the field after the cursor, and relationship paths (`Owner.Na`)
+  complete in the editor again.
+- Fewer wrong clause readings while typing: fields whose names end in `and` /
+  `or` (`Brand`, `Vendor`) are no longer mistaken for a WHERE condition, ORDER BY /
+  GROUP BY / HAVING keep suggesting after a function call in the list, and
+  picklist values with spaces (`'Closed Won'`) stay suggested while you type them
+  and are inserted without doubled quotes.
+- On a cold metadata cache one `sf sobject describe` now runs to completion
+  instead of being restarted on every keystroke, so suggestions appear after the
+  first call.
+- Fixed: a `)` inside a string literal was flagged as an unmatched parenthesis,
+  and the automatic `LIMIT` was placed after `OFFSET` / `FOR UPDATE`, producing
+  invalid SOQL.
+
 ## 0.10.2
 
 - **The "no metadata cache" prompt is readable again.** Switching to an org
