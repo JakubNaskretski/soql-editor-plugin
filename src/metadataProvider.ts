@@ -256,21 +256,20 @@ export class MetadataProvider {
         // 3. Try live CLI describe — shared per object: diagnostics and completion
         //    both miss the cold cache for the same FROM object at the same moment,
         //    which used to spawn two identical `sf sobject describe` subprocesses.
-        //    Join rule: a run driven by its initiator's AbortSignal can be cancelled
-        //    mid-keystroke and resolve undefined for every joiner — and a signal-less
-        //    caller (diagnostics, panel fetch) treats undefined as "object doesn't
-        //    exist". So signal-less callers never join an abortable run: they start
-        //    their own non-abortable one and take over the slot, becoming the safer
-        //    join target for everyone after them.
+        //    The shared run is never tied to a caller's AbortSignal: VS Code cancels
+        //    completion request N the instant request N+1 is typed, so an abortable
+        //    run died under every joiner and a typing burst restarted the cold
+        //    describe forever without ever filling the cache. Callers discard the
+        //    result themselves once their token fired; the one subprocess (capped
+        //    by timeoutMs) runs to completion and the next keystroke is a cache hit.
         const inflight = this.describeInflight.get(normalizedName);
-        if (inflight && (options?.signal || !inflight.abortable)) { return inflight.promise; }
+        if (inflight) { return inflight.promise; }
         // Capture the org this run describes against. getCacheDir() resolves the
         // CURRENT org at write time, so a switch during the live describe would
         // otherwise persist org A's fields into org B's on-disk cache.
         const describeOrg = this.sfCli.getCurrentOrg()?.username;
         const run = (async (): Promise<SObjectDescribe | undefined> => {
             const live = await this.sfCli.describeSObject(normalizedName, {
-                signal: options?.signal,
                 timeoutMs: options?.timeoutMs,
             });
             if (live) {
@@ -285,20 +284,19 @@ export class MetadataProvider {
             }
             return undefined;
         })().finally(() => {
-            // Identity check: an org switch (clearInMemoryCaches) or a non-abortable
-            // takeover may have replaced this entry — never delete a successor's.
+            // Identity check: an org switch (clearInMemoryCaches) may have replaced
+            // this entry — never delete a successor's.
             if (this.describeInflight.get(normalizedName)?.promise === run) {
                 this.describeInflight.delete(normalizedName);
             }
         });
-        this.describeInflight.set(normalizedName, { promise: run, abortable: !!options?.signal });
+        this.describeInflight.set(normalizedName, { promise: run });
         return run;
     }
 
     /** Live describes in flight, keyed by normalized object name (cleared on settle
-     *  and on org switch). `abortable` marks a run governed by its initiator's
-     *  AbortSignal — see the join rule in describeSObject. */
-    private describeInflight = new Map<string, { promise: Promise<SObjectDescribe | undefined>; abortable: boolean }>();
+     *  and on org switch); every caller joins the one run. */
+    private describeInflight = new Map<string, { promise: Promise<SObjectDescribe | undefined> }>();
 
     // ── disk cache ─────────────────────────────────────────────────────
 

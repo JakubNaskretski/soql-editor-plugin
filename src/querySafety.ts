@@ -68,6 +68,14 @@ export function applyLimit(query: string, limit: number): string {
             return `${before} ${limit}${rest}`;
         }
     }
+    // LIMIT must precede a top-level OFFSET / FOR UPDATE|VIEW|REFERENCE.
+    const insertAt = ['OFFSET', 'FOR']
+        .flatMap(k => findKeywordHits(trimmed, k).filter(h => h.depth === 0))
+        .map(h => h.index)
+        .sort((a, b) => a - b)[0];
+    if (insertAt !== undefined) {
+        return `${trimmed.slice(0, insertAt).replace(/\s+$/, '')} LIMIT ${limit} ${trimmed.slice(insertAt)}`;
+    }
     return `${trimmed} LIMIT ${limit}`;
 }
 
