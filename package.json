@@ -2,7 +2,7 @@
   "name": "soql-editor",
   "displayName": "SOQL Editor",
   "description": "SOQL editor for Salesforce with smart autocomplete, validation, and multi-org query execution",
-  "version": "0.10.3",
+  "version": "0.11.0",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "keywords": [
@@ -174,6 +174,12 @@
           "type": "boolean",
           "default": false,
           "description": "Run editor (.soql file) queries against the Tooling API (`sf data query --use-tooling-api`), which exposes setup/metadata objects like ApexClass, CustomField, and FlowDefinition. The sidebar panel has its own per-panel Tooling toggle."
+        },
+        "soqlEditor.syncOrgWithFamily": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "Follow and publish the Salesforce org shared across the Skrety SF plugins (`skrety.salesforce.targetOrg`). Off: this plugin keeps its own org and ignores switches made in sibling plugins."
         }
       }
     }

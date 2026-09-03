@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Hoisted mocks: setSharedOrg (the cross-plugin write we assert on) and a shared
-// status-bar stub the OrgPicker mutates via updateLabel().
+// Hoisted mocks: setSharedOrg (the cross-plugin write we assert on), a shared
+// status-bar stub the OrgPicker mutates via updateLabel(), and a settings store
+// backing `soqlEditor.syncOrgWithFamily` (the org-sync opt-in, default off).
 const { setSharedOrgMock, hoisted } = vi.hoisted(() => ({
     setSharedOrgMock: vi.fn(),
     hoisted: {
         statusBar: { command: '', tooltip: '', text: '', show: () => {}, dispose: () => {} },
+        config: {} as Record<string, unknown>,
     },
 }));
 
@@ -64,6 +66,9 @@ vi.mock('vscode', () => {
         ThemeIcon,
         StatusBarAlignment: { Left: 1, Right: 2 },
         ProgressLocation: { Notification: 15 },
+        workspace: {
+            getConfiguration: () => ({ get: (key: string) => hoisted.config[key] }),
+        },
         window: {
             createStatusBarItem: () => hoisted.statusBar,
             createQuickPick: () => { const qp = new FakeQuickPick(); quickPicks.push(qp); return qp; },
@@ -116,32 +121,69 @@ function lastQuickPick() {
 /** Let pending microtasks/timers (the background revalidate) settle. */
 const flush = () => new Promise<void>(r => setTimeout(r, 0));
 
+/** Turn the org-sync opt-in on for a test (it defaults off). */
+const enableOrgSync = () => { hoisted.config['soqlEditor.syncOrgWithFamily'] = true; };
+
+/** Drive the picker to a user pick of `org` and wait for it to close. */
+async function pickViaPicker(picker: OrgPicker, org: OrgInfo) {
+    const closed = picker.showPicker();
+    await flush(); // background revalidate lands
+    const qp = lastQuickPick();
+    const item = qp.items.find((i: any) => i.org.username === org.username);
+    qp.accept(item);
+    await closed;
+    return qp;
+}
+
 beforeEach(() => {
     vi.clearAllMocks();
     quickPicks.length = 0;
     hoisted.statusBar.text = '';
+    hoisted.config = {}; // org sync off — the shipped default
     withProgressMock.mockImplementation(async (_opts: unknown, task: () => unknown) => task());
 });
 
 describe('OrgPicker shared-setting write policy', () => {
-    it('publishes to the shared setting only on a user-initiated pick', async () => {
+    it('publishes to the shared setting on a user-initiated pick when sync is ON', async () => {
+        enableOrgSync();
         const sfCli = makeSfCli(undefined);
         sfCli.listOrgs.mockResolvedValue([ORG_A]);
 
         const picker = new OrgPicker(sfCli as any);
         const fired = capture(picker);
-        const closed = picker.showPicker();
-        await flush(); // background revalidate lands
-        const qp = lastQuickPick();
-        expect(qp.items.map((i: any) => i.org)).toEqual([ORG_A]);
-
-        qp.accept(qp.items[0]);
-        await closed;
+        const qp = await pickViaPicker(picker, ORG_A);
 
         expect(setSharedOrgMock).toHaveBeenCalledWith('a@example.com');
         expect(sfCli.setCurrentOrg).toHaveBeenCalledWith(ORG_A);
         expect(fired).toEqual([ORG_A]);
         expect(qp.disposed).toBe(true);
+    });
+
+    it('keeps a user pick local when sync is OFF, but still fires the change event', async () => {
+        const sfCli = makeSfCli(undefined);
+        sfCli.listOrgs.mockResolvedValue([ORG_A]);
+
+        const picker = new OrgPicker(sfCli as any);
+        const fired = capture(picker);
+        await pickViaPicker(picker, ORG_A);
+
+        expect(setSharedOrgMock).not.toHaveBeenCalled();
+        // The own change event still fires — it is what persists the private key.
+        expect(sfCli.setCurrentOrg).toHaveBeenCalledWith(ORG_A);
+        expect(fired).toEqual([ORG_A]);
+    });
+
+    it('does NOT write the shared setting on startup auto-select, even with sync ON', async () => {
+        enableOrgSync();
+        const sfCli = makeSfCli(undefined);
+        sfCli.listOrgs.mockResolvedValue([ORG_A]);
+
+        const picker = new OrgPicker(sfCli as any);
+        const fired = capture(picker);
+        await picker.autoSelectDefault('a@example.com');
+
+        expect(setSharedOrgMock).not.toHaveBeenCalled();
+        expect(fired).toEqual([ORG_A]);
     });
 
     it('does NOT write the shared setting on startup auto-select (activation)', async () => {
@@ -157,7 +199,8 @@ describe('OrgPicker shared-setting write policy', () => {
         expect(fired).toEqual([ORG_A]);
     });
 
-    it('does NOT write the shared setting when following an external switch', async () => {
+    it('adopts a shared-setting change and fires its own event, without writing back', async () => {
+        enableOrgSync();
         const sfCli = makeSfCli(ORG_A);
         sfCli.listOrgs.mockResolvedValue([ORG_A, ORG_B]);
 
@@ -322,7 +365,8 @@ describe('OrgPicker org-list cache', () => {
 });
 
 describe('OrgPicker panel-picklist API', () => {
-    it('pickKnownOrg applies a cached org as a user pick (writes the shared setting)', async () => {
+    it('pickKnownOrg applies a cached org as a user pick (writes the shared setting when sync is ON)', async () => {
+        enableOrgSync();
         const sfCli = makeSfCli(undefined);
         const memento = makeMemento({ [ORG_CACHE_KEY]: [ORG_A, ORG_B] });
 
@@ -332,6 +376,19 @@ describe('OrgPicker panel-picklist API', () => {
 
         expect(sfCli.setCurrentOrg).toHaveBeenCalledWith(ORG_B);
         expect(setSharedOrgMock).toHaveBeenCalledWith('b@example.com');
+        expect(fired).toEqual([ORG_B]);
+    });
+
+    it('pickKnownOrg stays local when sync is OFF', async () => {
+        const sfCli = makeSfCli(undefined);
+        const memento = makeMemento({ [ORG_CACHE_KEY]: [ORG_A, ORG_B] });
+
+        const picker = new OrgPicker(sfCli as any, memento as any);
+        const fired = capture(picker);
+        picker.pickKnownOrg('b@example.com');
+
+        expect(sfCli.setCurrentOrg).toHaveBeenCalledWith(ORG_B);
+        expect(setSharedOrgMock).not.toHaveBeenCalled();
         expect(fired).toEqual([ORG_B]);
     });
 
@@ -414,17 +471,39 @@ describe('OrgPicker.applyExternalOrgUsername resilience', () => {
         expect(memento.store[ORG_CACHE_KEY]).toEqual([ORG_A, ORG_B]);
     });
 
-    it('clears the current org and shows the no-org state on an external clear', async () => {
+    it('ignores an external clear and stays on the current org (sync ON)', async () => {
+        enableOrgSync();
         const sfCli = makeSfCli(ORG_A);
 
         const picker = new OrgPicker(sfCli as any);
+        const label = hoisted.statusBar.text;
         const fired = capture(picker);
         await picker.applyExternalOrgUsername(undefined);
 
-        expect(sfCli.clearCurrentOrg).toHaveBeenCalled();
-        expect(hoisted.statusBar.text).toContain('No Org');
+        // Emptying the family setting must never blank this plugin's target.
+        expect(sfCli.clearCurrentOrg).not.toHaveBeenCalled();
+        expect(sfCli.setCurrentOrg).not.toHaveBeenCalled();
+        expect(sfCli.getCurrentOrg()).toEqual(ORG_A);
+        expect(hoisted.statusBar.text).toBe(label);
         expect(setSharedOrgMock).not.toHaveBeenCalled();
-        expect(fired).toEqual([]); // a clear has no org payload, so it fires no change event
+        expect(fired).toEqual([]);
+    });
+
+    it('an external clear does not supersede a switch already in flight', async () => {
+        enableOrgSync();
+        const sfCli = makeSfCli(ORG_A);
+        let resolveList!: (v: OrgInfo[]) => void;
+        sfCli.listOrgs.mockReturnValue(new Promise<OrgInfo[]>(r => { resolveList = r; }));
+
+        const picker = new OrgPicker(sfCli as any);
+        const fired = capture(picker);
+
+        const switchB = picker.applyExternalOrgUsername('b@example.com');
+        await picker.applyExternalOrgUsername(undefined); // ignored, keeps no token
+        resolveList([ORG_A, ORG_B]);
+        await switchB;
+
+        expect(fired).toEqual([ORG_B]);
     });
 
     it('ignores a superseded external switch that resolves out of order (generation token)', async () => {

@@ -10,10 +10,15 @@ import { QueryExecutor } from './queryExecutor';
 import { SoqlPanelProvider } from './soqlPanelProvider';
 import { MetadataProvider } from './metadataProvider';
 import { QueryHistoryStore } from './queryHistory';
-import { migrateToSharedOrg, onSharedOrgChange } from './kit/orgs';
+import { getSharedOrg, onSharedOrgChange } from './kit/orgs';
+import {
+    LAST_SELECTED_ORG_KEY,
+    ORG_SYNC_SETTING,
+    isOrgSyncEnabled,
+    resolveStartupOrg
+} from './orgSync';
 
 const SOQL_SELECTOR: vscode.DocumentSelector = { language: 'soql', scheme: 'file' };
-const LAST_SELECTED_ORG_KEY = 'soqlEditor.lastSelectedOrgUsername';
 
 export function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('SOQL Editor');
@@ -32,8 +37,8 @@ export function activate(context: vscode.ExtensionContext) {
     // Sidebar panel
     const panelProvider = new SoqlPanelProvider(sfCli, metadata, outputChannel, context.extensionUri, history);
     // The panel's inline org picklist is backed by OrgPicker's cached list:
-    // picking in the dropdown is a user pick (writes the shared org setting),
-    // and every fresh `sf org list` re-feeds the dropdown.
+    // picking in the dropdown is a user pick (so it publishes to the shared org
+    // setting when sync is on), and every fresh `sf org list` re-feeds it.
     panelProvider.getOrgs = () => orgPicker.getKnownOrgs();
     panelProvider.onPickOrg = (username) => orgPicker.pickKnownOrg(username);
     panelProvider.onRefreshOrgs = () => orgPicker.refreshOrgs();
@@ -52,12 +57,12 @@ export function activate(context: vscode.ExtensionContext) {
     // Single org-change handler (consolidated; previously two separate listeners
     // were registered, neither disposed).
     orgPicker.onOrgChanged(async (org) => {
-        // Keep the legacy private key updated for one release (migration fallback).
-        // The shared cross-plugin setting is written ONLY by a user-initiated pick
-        // (inside OrgPicker.applySelection). Programmatic changes that reach here —
-        // startup auto-select and external shared-setting changes — must NOT write
-        // it back, or merely activating this plugin (or following another sibling's
-        // switch) would silently retarget the whole family.
+        // The private key is this plugin's source of truth and is written on
+        // EVERY applied change (user pick, startup auto-select, following the
+        // family). The shared cross-plugin setting is written ONLY by a
+        // user-initiated pick, and only while org sync is on (inside
+        // OrgPicker.applySelection) — otherwise merely activating this plugin, or
+        // following a sibling's switch, would retarget the whole family.
         await context.globalState.update(LAST_SELECTED_ORG_KEY, org.username);
 
         // Drop the shared, non-per-org in-memory caches so the new org never
@@ -78,19 +83,40 @@ export function activate(context: vscode.ExtensionContext) {
         await maybePromptForMetadataReadiness(metadata, promptType);
     });
 
-    // Auto-select default org (after listener is registered). Prefer the shared
-    // cross-plugin setting; one-time seed it from the legacy private key so an
-    // existing install keeps its org and starts publishing it to the family.
-    const lastSelectedOrg = context.globalState.get<string>(LAST_SELECTED_ORG_KEY);
-    void migrateToSharedOrg(lastSelectedOrg).then(effectiveOrg =>
-        orgPicker.autoSelectDefault(effectiveOrg ?? lastSelectedOrg)
+    // Auto-select the startup org (after the listener is registered). The private
+    // key decides, with the one-time shared→private backfill and — only while
+    // sync is on — the family's org applied first; an empty private key falls
+    // back to the CLI default. Nothing here writes the shared setting.
+    void resolveStartupOrg(context.globalState).then(
+        startupOrg => orgPicker.autoSelectDefault(startupOrg),
+        err => {
+            // A globalState read/write failure must not leave the window org-less:
+            // log it and fall through to the CLI-default auto-select.
+            outputChannel.appendLine(`Could not resolve the stored org: ${err?.message ?? err}`);
+            return orgPicker.autoSelectDefault(undefined);
+        }
     );
 
     // React to external writes of the shared setting (another family plugin or
-    // the user editing settings) by retargeting this plugin to that org.
+    // the user editing settings) by retargeting this plugin to that org — but
+    // only while sync is on. The flag is read here, at event time, so toggling it
+    // takes effect without a reload. An empty shared value is never adopted:
+    // clearing the family org leaves this plugin on the org it is using.
     context.subscriptions.push(
         onSharedOrgChange(username => {
+            if (!username || !isOrgSyncEnabled()) { return; }
             void orgPicker.applyExternalOrgUsername(username);
+        })
+    );
+
+    // Turning sync ON adopts the family's current org right away (again, only a
+    // non-empty one). Turning it off does nothing — this plugin simply keeps the
+    // org it is on.
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (!e.affectsConfiguration(ORG_SYNC_SETTING) || !isOrgSyncEnabled()) { return; }
+            const shared = getSharedOrg();
+            if (shared) { void orgPicker.applyExternalOrgUsername(shared); }
         })
     );
 
