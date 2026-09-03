@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0
+
+- **Your org is now your own.** Switching the org in SOQL Editor no longer switches
+  it in the other Skrety Salesforce extensions, and their switches no longer move
+  yours. Prefer the old shared behavior? Turn on `soqlEditor.syncOrgWithFamily`
+  (off by default) — it takes effect immediately, follows the shared org and
+  publishes your picks to it. On the first start after updating you keep the org
+  you were already using.
+
 ## 0.10.3
 
 - **Autocomplete works when you insert a field between existing ones.** Typing a

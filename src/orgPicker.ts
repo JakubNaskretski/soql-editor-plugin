@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { dedupeOrgInfos, SfCliService, OrgInfo } from './sfCliService';
 import { setSharedOrg } from './kit/orgs';
+import { isOrgSyncEnabled } from './orgSync';
 
 interface OrgQuickPickItem extends vscode.QuickPickItem {
     org: OrgInfo;
@@ -93,7 +94,8 @@ export class OrgPicker {
     /** Select an org by username, from the panel's inline picklist. Honors only
      *  usernames present in the cached list — the webview can only legitimately
      *  offer what we gave it, so anything else is stale/forged and ignored.
-     *  This IS a user-initiated pick: it publishes to the shared setting. */
+     *  This IS a user-initiated pick: it publishes to the shared setting when
+     *  org sync is on. */
     pickKnownOrg(username: string): void {
         const org = this.knownOrgs.find(o => o.username.toLowerCase() === username.toLowerCase());
         if (org) { this.applySelection(org, true); }
@@ -126,9 +128,10 @@ export class OrgPicker {
             const picked = qp.selectedItems[0];
             qp.hide();
             if (picked) {
-                // User-initiated pick: applySelection publishes the choice to the
-                // shared cross-plugin setting so the other family plugins retarget
-                // the same org. This is the ONLY path allowed to write it.
+                // User-initiated pick: when org sync is on, applySelection also
+                // publishes the choice to the shared cross-plugin setting so the
+                // other family plugins retarget the same org. A user pick is the
+                // ONLY path allowed to write it.
                 this.applySelection(picked.org, true);
                 vscode.window.showInformationMessage(`SOQL Editor: Now targeting ${picked.org.alias}`);
             }
@@ -233,15 +236,21 @@ export class OrgPicker {
     /** Apply an org locally (sfCli + label + change event). Shared between the
      *  manual picker, startup auto-select, and external shared-setting changes.
      *
-     *  `userInitiated` gates the one cross-plugin side effect: only a manual pick
-     *  publishes to the shared `skrety.salesforce.targetOrg` setting. Programmatic
-     *  applies (startup auto-select, following an external change) stay local, so
-     *  merely activating this plugin — or following the family — never writes the
-     *  shared setting back and silently retargets every sibling. */
+     *  Two conditions gate the one cross-plugin side effect — the write to the
+     *  shared `skrety.salesforce.targetOrg` setting. It happens only for a manual
+     *  pick (`userInitiated`), and only while `soqlEditor.syncOrgWithFamily` is on.
+     *  Programmatic applies (startup auto-select, following an external change)
+     *  stay local, so merely activating this plugin — or following the family —
+     *  never writes the setting back and silently retargets every sibling; and
+     *  with sync off this plugin keeps its org choice entirely to itself.
+     *
+     *  The local change event fires either way, so the rest of the extension
+     *  (private key, caches, diagnostics, panel) follows every pick regardless of
+     *  the sync flag. */
     private applySelection(org: OrgInfo, userInitiated: boolean) {
         this.sfCli.setCurrentOrg(org);
         this.updateLabel();
-        if (userInitiated) {
+        if (userInitiated && isOrgSyncEnabled()) {
             // Fire-and-forget; the write is idempotent and our own
             // onSharedOrgChange handler no-ops when the username already matches.
             void setSharedOrg(org.username);
@@ -260,25 +269,27 @@ export class OrgPicker {
     /**
      * React to an external write of the shared `skrety.salesforce.targetOrg`
      * setting (another family plugin, or the user editing settings): switch this
-     * plugin to that org. No-ops when it already matches the current org (so our
+     * plugin to that org. The caller decides whether to follow at all — it only
+     * reaches here while `soqlEditor.syncOrgWithFamily` is on, or when that
+     * setting has just been turned on, and an empty value is ignored outright.
+     * No-ops when it already matches the current org (so our
      * own picker write doesn't cause a redundant re-switch). Applies locally only
      * — an external change must never be written back to the shared setting.
      */
     async applyExternalOrgUsername(username: string | undefined): Promise<void> {
+        // An EMPTY shared value is never adopted: clearing the family org (a
+        // sibling's reset, a hand-edited settings file) must not blank this
+        // plugin's working target and strand the window with no org. There is
+        // nothing to switch to, so this returns before touching the generation
+        // token too — an empty value must not supersede a switch still in flight.
+        if (!username) { return; }
+
         // Monotonic generation: rapid external A→B→C switches each fire this
         // handler. Capture a token now and re-check it after the async listOrgs so
         // a superseded resolution bails instead of clobbering a newer choice
         // (out-of-order listOrgs completions could otherwise land B after C).
         const gen = ++this.applyGeneration;
 
-        // External clear (the shared setting was emptied): drop the current org and
-        // show the no-org state rather than silently staying on the org every
-        // sibling just moved off.
-        if (!username) {
-            this.sfCli.clearCurrentOrg();
-            this.updateLabel();
-            return;
-        }
         if (this.sfCli.getCurrentOrg()?.username === username) { return; }
 
         let orgs: OrgInfo[];
