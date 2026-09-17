@@ -2,7 +2,7 @@
   "name": "soql-editor",
   "displayName": "SOQL Editor",
   "description": "SOQL editor for Salesforce with smart autocomplete, validation, and multi-org query execution",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "keywords": [
@@ -99,6 +99,11 @@
         "command": "soqlEditor.queryHistory",
         "title": "SOQL: Query History",
         "icon": "$(history)"
+      },
+      {
+        "command": "soqlEditor.help",
+        "title": "SOQL: How It Works",
+        "icon": "$(question)"
       }
     ],
     "keybindings": [
@@ -126,6 +131,13 @@
           "command": "soqlEditor.queryHistory",
           "when": "editorLangId == soql",
           "group": "navigation"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "soqlEditor.help",
+          "when": "view == soqlEditor.panel",
+          "group": "navigation@9"
         }
       ]
     },

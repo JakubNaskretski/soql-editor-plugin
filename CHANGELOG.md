@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0
+
+- **How it works, at a glance.** The **?** in the SOQL Query panel title opens a
+  short guide — org selection, running and history, metadata sync for
+  autocomplete, results, Tooling API — with an **Open README** button for the
+  full documentation.
+
 ## 0.11.0
 
 - **Your org is now your own.** Switching the org in SOQL Editor no longer switches
