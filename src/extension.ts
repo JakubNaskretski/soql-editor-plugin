@@ -149,6 +149,10 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('soqlEditor.help', () => showHelp(context))
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('soqlEditor.selectOrg', () => {
             return orgPicker.showPicker();
         })
@@ -306,7 +310,7 @@ export async function maybePromptForMetadataReadiness(
             ? 'SOQL Editor: Metadata cache is empty for this org — autocomplete may be limited.'
             : 'SOQL Editor: This org has no metadata cache yet — autocomplete may be limited.';
 
-    // ponytail: 2 buttons max. VS Code squeezes notification actions onto one
+    // 2 buttons max: VS Code squeezes notification actions onto one
     // line and truncates them, so the old 5-action toast was unreadable.
     // The real choices live in the quick pick below, where they get full labels.
     const open = await vscode.window.showInformationMessage(title, 'Set Up Metadata', 'Later');
@@ -523,3 +527,27 @@ function copyDirRecursive(src: string, dest: string) {
 
 export function deactivate() {}
 
+// The "?" in the panel title: a short plain-text guide (a modal's detail renders no markdown).
+async function showHelp(context: vscode.ExtensionContext): Promise<void> {
+    const HELP = `1. Authenticate an org first: sf org login web (Salesforce CLI required).
+2. Pick the org from the status bar, the panel dropdown, or SOQL: Select Org.
+3. Query from the SOQL Query panel in the Activity Bar, or open a .soql file.
+4. Run with Cmd/Ctrl+Enter. Past queries: the panel's History button, or Cmd/Ctrl+Alt+H in a .soql file.
+5. Autocomplete needs org metadata: Load Metadata, then Sync Common + Custom Objects.
+6. Results: click an Id to open the record, click a cell to copy, open them as CSV or JSON.
+7. Tooling API objects (ApexClass, CustomField): the panel's Tooling toggle, or soqlEditor.useToolingApi for .soql files.
+8. Stale fields after an org change? SOQL: Clear Cache, then sync again.`;
+    const choice = await vscode.window.showInformationMessage('SOQL Editor', { modal: true, detail: HELP }, 'Open README');
+    if (choice === 'Open README') {
+        // vsce ships the file as readme.md while the dev host has README.md: open whichever exists
+        for (const name of ['readme.md', 'README.md']) {
+            const uri = vscode.Uri.joinPath(context.extensionUri, name);
+            try {
+                await vscode.workspace.fs.stat(uri);
+                await vscode.commands.executeCommand('markdown.showPreview', uri);
+                return;
+            } catch { /* try the other spelling */ }
+        }
+        void vscode.window.showWarningMessage('README not found in the extension folder.');
+    }
+}
