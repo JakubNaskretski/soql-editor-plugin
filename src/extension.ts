@@ -59,11 +59,12 @@ export function activate(context: vscode.ExtensionContext) {
     orgPicker.onOrgChanged(async (org) => {
         // The private key is this plugin's source of truth and is written on
         // EVERY applied change (user pick, startup auto-select, following the
-        // family). The shared cross-plugin setting is written ONLY by a
+        // family). It lives in workspaceState, so each VS Code window keeps its
+        // own target org. The shared cross-plugin setting is written ONLY by a
         // user-initiated pick, and only while org sync is on (inside
         // OrgPicker.applySelection) — otherwise merely activating this plugin, or
         // following a sibling's switch, would retarget the whole family.
-        await context.globalState.update(LAST_SELECTED_ORG_KEY, org.username);
+        await context.workspaceState.update(LAST_SELECTED_ORG_KEY, org.username);
 
         // Drop the shared, non-per-org in-memory caches so the new org never
         // briefly serves the previous org's object list (30s TTL window).
@@ -87,10 +88,10 @@ export function activate(context: vscode.ExtensionContext) {
     // key decides, with the one-time shared→private backfill and — only while
     // sync is on — the family's org applied first; an empty private key falls
     // back to the CLI default. Nothing here writes the shared setting.
-    void resolveStartupOrg(context.globalState).then(
+    void resolveStartupOrg(context.workspaceState, context.globalState).then(
         startupOrg => orgPicker.autoSelectDefault(startupOrg),
         err => {
-            // A globalState read/write failure must not leave the window org-less:
+            // A memento read/write failure must not leave the window org-less:
             // log it and fall through to the CLI-default auto-select.
             outputChannel.appendLine(`Could not resolve the stored org: ${err?.message ?? err}`);
             return orgPicker.autoSelectDefault(undefined);

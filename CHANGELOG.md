@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.0
+
+- **Your org is now per window.** Each VS Code window remembers its own target org,
+  so two projects open side by side query two different orgs, and switching the org
+  in one window no longer moves the other. On the first start after updating every
+  window begins on the org SOQL Editor last used on this machine, so nothing changes until you pick —
+  check the status bar in each window and pick once where it differs; from then on
+  each window keeps its choice. With `soqlEditor.syncOrgWithFamily` on, the shared org
+  is still machine-wide, so all windows follow it together.
+
 ## 0.12.0
 
 - **How it works, at a glance.** The **?** in the SOQL Query panel title opens a
