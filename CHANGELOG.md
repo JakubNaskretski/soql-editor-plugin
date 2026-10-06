@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.1
+
+- **The console shows what ran, and where.** Every query run now logs the actual
+  `sf data query` command with the target org (username and alias) followed by the
+  full SOQL text, in both the panel console and the SOQL Editor output channel, so
+  you can confirm the right query hit the right org. The previous line only reported
+  the query's length. Metadata describe lines name their org too. Note that VS Code
+  keeps output-channel text in its log files on disk, so your queries now appear there.
+
 ## 0.13.0
 
 - **Your org is now per window.** Each VS Code window remembers its own target org,
