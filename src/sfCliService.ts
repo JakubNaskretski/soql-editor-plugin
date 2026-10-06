@@ -355,7 +355,6 @@ export class SfCliService {
             ], {
                 timeoutMs: options?.timeoutMs,
                 signal: options?.signal,
-                logLabel: `sf sobject describe --sobject ${normalizedName} --json`,
             });
             const describe = this.parseDescribeResult(result);
 
@@ -402,9 +401,18 @@ export class SfCliService {
         }
         args.push(...this.getTargetOrgArgs());
 
-        // Redacted log line: the temp path is meaningless to readers and the query
-        // itself stays out of the output channel.
-        const logLabel = `sf data query --json --result-format json (query via temp file, length=${query.length})`;
+        // Console line: the real command with its org, then the SOQL verbatim on
+        // the next line(s), so the panel console / output channel show exactly
+        // what ran and against which org. The temp path is dropped as noise; the
+        // query stands in for it. A missing --target-org is called out because
+        // that is the case where the CLI silently picks its own default org.
+        const org = this.currentOrg;
+        const target = org
+            ? `--target-org ${org.username}${org.alias && org.alias !== org.username ? ` (alias ${org.alias})` : ''}`
+            : '(no --target-org: CLI default org)';
+        // CRLF (Windows editors) normalised and trailing newlines dropped so the
+        // output channel gets no stray blank line after the query.
+        const logLabel = `sf data query${useToolingApi ? ' --use-tooling-api' : ''} ${target}\n${query.replace(/\r\n?/g, '\n').trimEnd()}`;
 
         let stdout: string;
         try {

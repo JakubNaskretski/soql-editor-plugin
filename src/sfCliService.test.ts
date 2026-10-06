@@ -336,3 +336,50 @@ describe('SfCliService.runCliAsync Windows spawn-plan wiring', () => {
         expect(execFileMock).not.toHaveBeenCalled();
     });
 });
+
+describe('SfCliService.executeQuery', () => {
+    beforeEach(() => {
+        execFileMock.mockReset();
+        execFileMock.mockImplementation((_file, _args, _opts, cb) =>
+            cb(null, JSON.stringify({ status: 0, result: { totalSize: 0, records: [] } }), ''));
+    });
+
+    it('logs the target org and the full query so the console shows what ran, and where', async () => {
+        const channel = { appendLine: vi.fn() };
+        const svc = new SfCliService(channel as any);
+        svc.setCurrentOrg(TEST_ORG);
+
+        await svc.executeQuery('SELECT Id\nFROM Account');
+
+        const cmdLine = channel.appendLine.mock.calls.map((c) => c[0]).find((l: string) => l.startsWith('[cmd]'));
+        expect(cmdLine).toContain('--target-org dev@example.com (alias dev)');
+        expect(cmdLine).toContain('SELECT Id\nFROM Account');
+        // The SOQL reaches the CLI only through the temp file, never argv (Windows
+        // cmd.exe rejects newline/quote args); the org is passed as the username.
+        const argv: string[] = execFileMock.mock.calls[0][1];
+        expect(argv).toContain('--file');
+        expect(argv.slice(argv.indexOf('--target-org'))).toEqual(['--target-org', 'dev@example.com']);
+        expect(argv.join(' ')).not.toContain('SELECT');
+    });
+
+    it('omits the alias when it equals the username, shows the tooling flag, and normalises CRLF', async () => {
+        const channel = { appendLine: vi.fn() };
+        const svc = new SfCliService(channel as any);
+        svc.setCurrentOrg({ ...TEST_ORG, alias: 'solo@example.com', username: 'solo@example.com' });
+
+        await svc.executeQuery('SELECT Id\r\nFROM Account\r\n', true);
+
+        const cmdLine = channel.appendLine.mock.calls.map((c) => c[0]).find((l: string) => l.startsWith('[cmd]'));
+        expect(cmdLine).toBe('[cmd] sf data query --use-tooling-api --target-org solo@example.com\nSELECT Id\nFROM Account');
+    });
+
+    it('calls out a missing --target-org, since the CLI then falls back to its default org', async () => {
+        const channel = { appendLine: vi.fn() };
+        const svc = new SfCliService(channel as any);
+
+        await svc.executeQuery('SELECT Id FROM Account');
+
+        const cmdLine = channel.appendLine.mock.calls.map((c) => c[0]).find((l: string) => l.startsWith('[cmd]'));
+        expect(cmdLine).toContain('(no --target-org: CLI default org)');
+    });
+});
